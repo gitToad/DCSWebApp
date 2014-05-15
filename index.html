@@ -1,0 +1,4498 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DCS World</title>
+    <meta charset="utf-8" />
+    
+    <!-- https://developer.apple.com/library/safari/documentation/appleapplications/reference/SafariHTMLRef/Articles/MetaTags.html -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    
+    <!-- more hocus pocus: for IOS home screen launched windows, show a nice splash screen while we are waiting for the app 
+        https://developer.apple.com/library/ios/documentation/AppleApplications/Reference/SafariWebContent/ConfiguringWebApplications/ConfiguringWebApplications.html
+        
+        need to add to these icons (craaayzy many now) see http://www.mobilexweb.com/blog/safari-ios7-html5-problems-apis-review
+        76, 120, 144, 152 
+    -->
+    <link rel="apple-touch-icon" href="images/ios/touch-icon.png">
+    <link rel="apple-touch-icon" sizes="57x57" href="images/ios/touch-icon-57.png">
+    <link rel="apple-touch-icon" sizes="72x72" href="images/ios/touch-icon-72.png">
+    <link rel="apple-touch-icon" sizes="114x114" href="images/ios/touch-icon-114.png">
+    
+    <link href="http://code.jquery.com/mobile/1.4.2/jquery.mobile-1.4.2.min.css" rel="stylesheet">
+    <script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
+    
+    <script type="text/javascript">
+        // binds should be before jq mobile script load
+        $(document).on("mobileinit", function()
+        {
+            jQuery.mobile.defaultPageTransition = "slide";
+        });
+
+    </script>
+    <script src="http://code.jquery.com/mobile/1.4.2/jquery.mobile-1.4.2.min.js"></script>
+    
+    
+    <script>
+        var editingNotesForPage;
+        var $meta = $("META[name=viewport]");
+        
+        var settings;
+        function restoreSettings()
+        {
+            settings = localStorage.getItem( "settings" );
+            if( !settings )
+            {
+                settings = { "speakChecklists": true };
+                persistSettings();
+            }
+            else
+            {
+                settings = $.parseJSON( settings );
+            } 
+        }
+        function persistSettings()
+        {
+            localStorage.setItem( "settings", JSON.stringify( settings ) );
+        }
+        restoreSettings();
+
+
+        
+        var canDoSpeech = 'SpeechSynthesisUtterance' in window;
+        function speak( msg )
+        {
+            if( !canDoSpeech || !settings.speakChecklists )
+                return;
+            
+            if( speechSynthesis.speaking )
+                speechSynthesis.cancel();
+            
+            // modify the string a bit. Change all uppercase words/abbreviations 
+            // "APU" -> "A.P.U." and "SU25T" -> "S.U.25T."
+            // since not all (esp Apple) speech synthesizers pronounce those correctly
+            var re = /[A-Z0-9\-]{2,}/gm; 
+            var msg2 = msg.replace( re, function(s) {
+                if( s==="HUD" ) return s; // leave HUD unchanged (just my preference...)
+                return s.replace( /([A-Z])/gm, "$1." );
+            } );
+            
+            // http://www.broken-links.com/2013/09/20/web-speech-api-part-one-speech-synthesis/
+            // https://dvcs.w3.org/hg/speech-api/raw-file/tip/speechapi.html#tts-section
+            var foo = new SpeechSynthesisUtterance(msg2);
+            foo.rate = 0.5;
+            /*
+            foo.text = msg;
+            foo.lang = 'en-US';
+            foo.pitch = 2.0;
+            foo.volume = 0.5;
+            */
+            speechSynthesis.speak(foo);
+        }
+        
+        function pageNameOf( pageID )
+        {
+            return $( "#" + pageID + " div[data-role=header] h1").text();
+        }
+        
+        function prepareViewAllNotesPage()
+        {
+            // create a new list
+            var html = "";
+            for (var i = 0; i < localStorage.length; i++)
+            {
+                var key = localStorage.key(i);
+                if( key.indexOf( "notes_" )===0 ) 
+                {
+                    var item = localStorage.getItem(key);
+                    var pageID = key.substr( "notes_".length );
+                    var pageName = pageNameOf( pageID );
+                    html += '<li><a href="#edit-note" for-pageID="' + pageID + '" data-transition="slideup">' + pageName + "</a></li>";
+                }
+            }
+            // find & empty the all-notes list contents
+            // mark up the list
+            $("#all-notes")
+                .empty()
+                .append( html )
+                .listview( "refresh" );
+        }
+
+
+        function speakNextChecklistItem()
+        {
+            // assumes we are on a checklist page at the moment
+            var checklist = getActivePage();
+            var checklistName = checklist.find( "DIV[data-role=header]>H1" ).text();
+            var firstItem = checklist.find( "ul.checklist>li:first" );
+            var nextItemToCheck = checklist.find( "ul.checklist>li:not(.checklist-item-checked):first" );
+            
+            if( nextItemToCheck.length===0 )
+            {
+                // we are at the end of a checklist (nothing more to check)
+                speak( "Checklist completed." );
+            }
+            else 
+            {
+                var titleToSpeak = nextItemToCheck.find( "h1" ).text();
+                if( firstItem[0]===nextItemToCheck[0] )
+                {
+                    // first item is same as next item to be spoken, ie beginning of list
+                    speak( "Starting checklist for " + checklistName );
+                }
+                speak( titleToSpeak );
+            }
+        }
+        
+        function getActivePage()
+        {
+            // jeez what are they thinking. Could we make this more complicated...
+            return $(":mobile-pagecontainer").pagecontainer( "getActivePage" );
+        }
+        
+        function lazyLoadImages( pageID )
+        {
+            // make page loading much faster by not loading any images
+            // initially. Instead only load them on demand, as (and if) a page gets shown
+            // Do this by converting No-op "src2" attributes to actual img src attributes
+            $("#" + pageID + " img[src2]").each( function() {
+                $this = $(this);
+                
+                $this.attr( "src", $this.attr( "src2" ) );
+                $this.removeAttr( "src2" );
+            });
+        }
+        
+        // helper functions for Favorites handling
+        
+        var nl = "\n"; // shorthand const
+        var favoritesKey = "favorites";
+        function localStorageGetFavorites()
+        {
+            return localStorage.getItem( favoritesKey ) || "";
+        }
+        
+        function addFavorite( pageID )
+        {
+            var favString = localStorageGetFavorites();
+            // only add if not in favs already
+            if( favString.indexOf( pageID + nl )===-1 )
+            {
+                favString += pageID + nl;
+                localStorage.setItem( favoritesKey, favString );
+            }
+        }
+        
+        function removeFavorite( pageID )
+        {
+            var favString = localStorageGetFavorites();
+            favString = favString.replace( pageID + nl, "" );
+            localStorage.setItem( favoritesKey, favString );
+        }
+        
+        function isFavorite( pageID )
+        {
+            var favString = localStorageGetFavorites();
+            return favString.indexOf( pageID + nl )!==-1;
+        }
+        
+        function prepareViewAllFavsPage()
+        {
+            // create a new list
+            var favString = localStorageGetFavorites();
+            var favs = favString.split( nl );
+            favs.pop(); // remove last empty (because final nl char) element
+            var html = "";
+            for (var i = 0; i < favs.length; i++)
+            {
+                var pageID = favs[i];
+                var pageName = pageNameOf( pageID );
+                html += '<li><a href="#' + pageID + '">' + pageName + "</a></li>";
+            }
+            // find & empty the all-favs list contents
+            // mark up the list
+            $("#all-favs")
+                .empty()
+                .append( html )
+                .listview( "refresh" );
+        }
+        
+        
+        
+        function prepareSettingsPage()
+        {
+            var $switch = $("#speak-checklists");
+            $switch.slider( canDoSpeech ? "enable" : "disable" );
+            $switch.val( (settings.speakChecklists && canDoSpeech) ? "on" : "off" );
+            $switch.slider( "refresh" );
+        }
+        
+        function switchToHomePage( event )
+        {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            $.mobile.changePage( "#home", {
+                transition: 'none'
+            });
+        }
+        
+        
+        $( document ).ready( function()
+        {
+            $body = $("BODY");
+            
+            $("A.dont-bubble").on( "tap", function( event ) {
+                event.stopPropagation();
+            });
+            
+            // handle clicks on checklist list items 
+            // ie toggle the checkbox and background color
+            $body.on( "tap", "UL.checklist>LI", function(event) {
+                var $this = $(this);
+                var $parent = $this.parent();
+                var $nextUncheckedItem = $parent.find( "LI:not(.checklist-item-checked):first" );
+                var $lastCheckedItem = $parent.find( "LI.checklist-item-checked:last" );
+                
+                // allow toggling only If
+                // - toggling the currently checked one to OFF
+                // - toggling the next available unchecked to ON
+                if( ($lastCheckedItem.length>0 && $this[0]===$lastCheckedItem[0] )
+                ||  ($nextUncheckedItem.length>0 && $this[0]===$nextUncheckedItem[0]) )
+                {
+                    $this.toggleClass( "checklist-item-checked" );
+                    speakNextChecklistItem();
+                    // refind first unchecked item, so we can scroll it 
+                    // to top of view
+                    $nextUncheckedItem = $parent.find( "LI:not(.checklist-item-checked):first" );
+                    if( $nextUncheckedItem.length===1 )
+                        $body.animate( {scrollTop: $nextUncheckedItem.position().top }, 
+                                        600, "swing" );
+                }
+                else
+                {
+                    speak( "Please complete previous steps first." );
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+            });
+            
+            // for checklist footers, handle the "reset" button
+            $body.on( "tap", "A.checklist-reset", function() {
+                var $li = $(this);
+                var $page = $li.parents("DIV[data-role=page]");
+                $page.find( "LI.checklist-item-checked" ).removeClass( "checklist-item-checked" );
+                // we want this to look like a button (momentary press) not a toggle:
+                $li.find(".ui-btn-active").removeClass("ui-btn-active");
+                $.mobile.silentScroll(0);
+                event.preventDefault();
+                event.stopPropagation();
+                speakNextChecklistItem();
+            });
+            
+            
+            // rather than create explicit JQM pages for each of the various airfield
+            // maps, capture the click on the anchor and dynamically set the image source
+            // attr in a single "image-container" page. Far less editing cruft, but
+            // also prevents bookmarking in the browser and Favs :( 
+            // May revisit / automatically generate source for the airfield map containers
+            // eventually...
+            $body.on( "tap", "A[HREF=#image-container]", function(event) {
+                var url = $(this).attr( "data-img-src" );
+                // we might modify the url here if we are on safari and on iOS
+                // in order to force using the Google native map app rather than
+                // the default google web app Apple Safari decides to launch by default
+                // for example, on iOS, in Safari:
+                // https://maps.google.com/maps?q=41%C2%B036%E2%80%9958%E2%80%9DN,41%C2%B...
+                // change front end to:
+                // comgooglemaps://?q=41%C2%B036%E2%80%9958%E2%80%9DN,41%C2%B...
+                $("#image-container-src").attr( "src", url );
+            });
+            
+            
+            $body.on( "tap", "A[for-pageID]", function() {
+                // special click handler for view-all-notes page list items/A's
+                // pass the pageID of the page for which we will be editing the
+                // note to the pagecontainerbeforetransition handler via this
+                // global
+                editingNotesForPage = $(this).attr("for-pageID");
+            });
+            
+            
+            $("#speak-checklists").on( "change", function( event ) {
+                settings.speakChecklists = $(this).val() === "on";
+                persistSettings();
+            });
+            
+            $("#delete-note").on( "tap", function() {
+                if( confirm( "Really delete these notes ?" ) )
+                {
+                    localStorage.removeItem( editingNotesForPage );
+                }
+                else
+                {
+                    // do not let the page transition back take place
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+            });
+            
+
+            $("#save-note").on( "tap", function(event) {
+                localStorage.setItem( editingNotesForPage, $pageNotes.val() )
+            });
+            
+            
+            $pageNotes = $("#page-notes"); // just a static to avoid looking up every time
+            $body.on( "pagecontainerbeforetransition", function( event, ui ) {
+                
+                var toPageID = ui.toPage.attr('id');
+
+                $meta.attr( "content", "width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" )
+        
+                lazyLoadImages( toPageID ); // convert any <img src2=...> to src
+
+                switch( toPageID )
+                {
+                    case "view-all-notes": return prepareViewAllNotesPage();
+                    case "view-all-favs":  return prepareViewAllFavsPage();
+                    case "settings":       return prepareSettingsPage();
+                    case "image-container": if(!ui.options.fromPage) 
+                                                return switchToHomePage( event );
+                }
+
+                var aboutToEdit = toPageID==="edit-note";
+                if( aboutToEdit )
+                {
+                    // if we refreshed the page with a /index.html#edit-note
+                    // then we are up the creek: we do not know what page we
+                    // are supposed to edit notes for
+                    if( !ui.options.fromPage )
+                    {
+                        // in this unfortunate case, just abort the planned
+                        // page opening of the notes editor
+                        // instead just jump to the home page
+                        return switchToHomePage(event);
+                    }
+                    // if we are going to the edit page, get the notes for the source page
+                    var fromPageID = ui.options.fromPage.attr('id')
+                    if( fromPageID !== "view-all-notes" )
+                        editingNotesForPage = fromPageID;
+                        
+                    $("#edit-note-for-page").text( pageNameOf( editingNotesForPage ) );
+                    
+                    // else we are coming from view-all-notes page and
+                    // the link click event handler has already set up
+                    // the editingNotesForPage global.
+                }
+                else
+                    // if we are just page transitioning, get the notes for the dest page
+                    editingNotesForPage = toPageID;
+                    
+                editingNotesForPage = "notes_" + editingNotesForPage;
+                var notes = localStorage.getItem( editingNotesForPage ) || "";
+
+                if( aboutToEdit )
+                {
+                    // set the value of the notes editing dialog to the prev stored note
+                    $pageNotes.val( notes );
+                    // dont bother showing delete note button if note is empty anyway
+                    $("#delete-note").toggle( notes !== "" );
+                }
+                else
+                {
+                    // not editing, just a regular page transition
+                    // make sure to highlight the Notes button if the toPage already
+                    // has a note stored for it
+                    $("#"+toPageID+ " a[href=#edit-note]").toggleClass("ui-btn-active",notes!=="");
+                }
+
+                $("#"+toPageID+ " a[href=#favs]").toggleClass("ui-btn-active",
+                    isFavorite(toPageID));
+            });
+            
+            
+            // this is equivalent to "on page open"
+            $body.on( "pageshow", function( event, ui ) {
+                var page = getActivePage();
+                
+                if( page.find( "ul.checklist" ).length===1 )
+                {
+                    // we are on a checklist page
+                    speakNextChecklistItem();
+                }
+                                
+                // speech input enable all search fields
+                // do this on page show because these fields get
+                // dynamically created by JQM
+                // ..just read that x-webkit-speech is deprecated...
+                // use Javascript API instead (more work)
+                /*
+                $("INPUT[data-type=search]").each( function() {
+                    $(this).attr( "x-webkit-speech", "" );
+                    $(this).on( "webkitspeechchange", function() {
+                        $(this).trigger("change");
+                    });
+                });
+                */
+            });
+
+            
+            // handle Favs button in footer press
+            $body.on( "tap", "A[href=#favs]", function( event ) {
+                var pageID = getActivePage().attr('id');
+                if( isFavorite( pageID ) )
+                {
+                    removeFavorite( pageID );
+                    $(this).removeClass("ui-btn-active");
+                }
+                else
+                {
+                    addFavorite( pageID );
+                    $(this).addClass("ui-btn-active");
+                }
+                // dont actually traverse the link
+                event.stopImmediatePropagation();
+                event.preventDefault();
+            });
+            
+            // this is a cheesy way to allow scaling of the image on desktops
+            // which does not affect tablets, phones (since no mousewheel)
+            // However no scroll bars, weird interaction w vertical scrolling
+            // need something better here...
+            $("#image-container-src").on( "wheel", function( event ) {
+                $this = $(this);
+                var max = (parseInt($this.css("max-width")) + event.originalEvent.wheelDelta/120) + "%";
+                $this.css( "max-width", max ).css( "max-height", max );
+            });
+        });
+    </script>
+    
+    <style>
+        /* various webkit power CSS: http://developer.apple.com/library/safari/#documentation/appleapplications/reference/SafariCSSRef/Articles/StandardCSSProperties.html */
+        /* avoid the ugly white space at the bottom (from jqm documentation site which uses this also) */
+        body {
+            background: #DDD;
+    
+            user-select: none;
+           -o-user-select:none;
+           -moz-user-select: none;
+           -khtml-user-select: none;
+           -webkit-user-select: none;
+        }
+        .hidden {
+            display: none;
+        }
+        .airfield-callsign {
+            font-family: Helvetica;
+            font-size: 200%;
+            color: #CCC;
+            font-weight: bold;
+            float: left;
+            margin: .3em 0em 0em -.3em;
+            width: 100px;
+            display: none;
+        }
+        .airfield-frequencies{
+            font-family: monospace;
+            white-space: pre !important;
+            position: relative;
+            left: -.4em;
+            font-weight: bold !important;
+            font-size: larger !important;
+        }
+        .airfield-name {
+            background-color: black;
+            color: white;
+            text-shadow: none;
+            padding: 4px 10px 3px 10px;
+            margin: -12px -50px -2px -20px;
+        }
+        .airfield-FKey {
+            float: right;
+        }
+        form.ui-filterable {
+            margin-top: -15px;
+        }
+        ul.checklist>li {
+            cursor: pointer;
+        }
+        .checklist-item-checked {
+            background-color: #B3FAAC !important;
+        }
+        table.airfield-table {
+            width: 100%;
+            padding: 0px;
+            border-spacing: 0px 10px;
+        }
+        table.airfield-table tr:nth-child(odd) {
+        background-color: #F0F0F0;
+        }
+        table.airfield-table td:first-child {
+        }
+        table.airfield-table td:last-child {
+            font-weight: bold;
+        }
+        i.key /* short for: keyboard short cut */ {
+            font-weight: bold;
+            color: white;
+            background-color: green;
+            font-style: normal;
+            padding: 5px;
+            text-shadow: none;
+            border-radius: 15px;
+        }
+        .ui-btn {
+            /* override the jquery default of 16px 
+             so things are easier to hit "while flying" */
+            font-size: 1.25em;
+        }
+        .ui-listview>li h1 {
+            font-size: 1.25em;
+        }
+        .ui-footer-fixed {
+            padding-left: 15px; /* JQM 1.4.2 bugfix: first footer button smack against left side */
+        }
+        .footer-button {
+            -webkit-box-shadow: none;
+            -moz-box-shadow: none;
+            box-shadow: none;
+            margin-top: .2em;
+            margin-bottom: .2em;
+        }
+        .checklist-reset {
+            /* another JQM bugfix: ui-btn-right in footer looks crap
+            so instead of fixing it generically I just add a rule for
+            the one type of button we need it for... */
+            float: right;
+            margin-right: 3em;
+        }
+        div.image-map {
+            width:100%; position:relative; margin-bottom:200px;
+        }
+        div.image-map img {
+            display:block; width:100%;
+        }
+        div.image-map-hotspots {
+            width:100%; height:100%; position:absolute; left:0; top:0; visibility:visible;
+        }
+        A.image-map-link {
+            display:block; position:absolute; 
+        }
+    </style>
+</head>
+<body>
+
+    <div data-role="page" id="home">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>DCS World</h1>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li><a href="#airfields">Airfields</a></li>
+                <li><a href="#modules">DCS Modules</a></li>
+                <li><a href="#command-map">Command Map &amp; Views</a></li>
+                <li><a href="#enemies">Weapons &amp; Threats</a></li>
+                <li><a href="#reference">Reference</a></li>
+                <li><a href="#glossary">Glossary</a></li>
+                <li><a href="#calculators">Calculators</a></li>
+            </ul>
+            <p><br><br>Personal:</p><br>
+            <ul data-role="listview">
+                <li><a href="#settings">Settings</a></li>
+                <li><a href="#view-all-notes">Notes</a></li>
+                <li><a href="#view-all-favs">Favorites</a></li>                
+            </ul>
+        </div>
+    </div>
+
+
+
+    <div data-role="page" id="modules">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>DCS Modules</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#SU25T"><img src2="images/dcs/SU25.png" />SU-25T Frogfoot<p>Comes with DCS World</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/P51D.png" />TF-51D Trainer<p>Comes with DCS World</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/P51D.png" />P-51D Mustang</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/A10C.png" />A-10C Warthog</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/Mi8.png" />Mi8 MTV2</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/UH50.png" />UH-1H Huey</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/BlackShark.png" />Black Shark 2</a></li>
+                <li><a href="#combined-arms"><img src2="images/dcs/CA.png" />Combined Arms</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/F15C.png" />F-15C Eagle<p>DCS Flaming Cliffs 3</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/A10C.png" /><h2>A-10A Thunderbolt II</h2><p>DCS Flaming Cliffs 3</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/SU33.png" />Su-27<p>DCS Flaming Cliffs 3</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/SU33.png" />Su-33 Flanker<p>DCS Flaming Cliffs 3</p></a</li>
+                <li><a href="#NYA"><img src2="images/dcs/MIG29.png" />Mig-29A<p>DCS Flaming Cliffs 3</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/MIG29.png" />Mig-29S Fulcrum<p>DCS Flaming Cliffs 3</p></a></li>
+                <li><a href="#NYA"><img src2="images/dcs/SU25.png" />SU-25 Frogfoot<p>DCS Flaming Cliffs 3</p></a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+    <div data-role="page" id="command-map">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Command Map</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#view-commands">View Commands<p>All the F keys !</p></a></li>
+                <li><a href="#NYA">Command Map<p></p></a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+    <div data-role="page" id="reference">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Reference</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li data-role="list-divider">USA</li>
+                <li data-role="list-divider">Armor</li>
+                <li><a href="#"><img src2="images/dcs/SU25.png" />SU25T</a></li>
+                <li data-role="list-divider">Anti Air</li>
+                <li><a href="#"><img src2="images/dcs/icons/a10c.png" />A10C</a></li>
+                <li><a href="#"><img src2="images/dcs/icons/bs2.png" />FC3 F15C</a></li>
+                <li><a href="#"><img src2="images/dcs/icons/ca.png" />Mi8 MTV2</a></li>
+                <li data-role="list-divider">Transport</li>
+                <li><a href="#"><img src2="images/dcs/icons/fc3.png" />Mi8 MTV2</a></li>
+                <li><a href="#"><img src2="images/dcs/icons/MI-8.png" />Mi8 MTV2</a></li>
+                <li data-role="list-divider">Planes</li>
+                <li><a href="#"><img src2="images/dcs/icons/p51d.png" />Mi8 MTV2</a></li>
+                <li><a href="#"><img src2="images/dcs/icons/uh1.png" />Mi8 MTV2</a></li>
+                <li><a href="#"><img src2="images/dcs/icons/world.png" />Mi8 MTV2</a></li>
+                <li data-role="list-divider">Helicopters</li>
+                <li><a href="#"><img src2="images/dcs/icons/DCS-Forum-Banner.png" />Mi8 MTV2</a></li>
+                <li><a href="#"><img src2="images/dcs/Mi8.png" />Mi8 MTV2</a></li>
+                <li data-role="list-divider">Ships</li>
+                <li><a href="#"><img src2="images/dcs/Mi8.png" />Mi8 MTV2</a></li>
+                <li><a href="#"><img src2="images/dcs/Mi8.png" />Mi8 MTV2</a></li>
+                <li data-role="list-divider">Infantry</li>
+
+                <li data-role="list-divider">Russia</li>
+                <li data-role="list-divider">Armor</li>
+                <li><a href="#"><img src2="images/dcs/UH50.png" />UH1H Huey</a></li>
+                <li data-role="list-divider">Anti Air</li>
+                <li><a href="#"><img src2="images/dcs/P51D.png" />P51D</a></li>
+                <li><a href="#"><img src2="images/dcs/BlackShark.png" />Black Shark 2</a></li>
+                <li data-role="list-divider">Transport</li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+   </div>
+
+
+    <div data-role="page" id="combined-arms">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Combined Arms</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#NYA">Command Map</a></li>
+                <li><a href="#NYA">Ground Commander Role</a></li>
+                <li><a href="#NYA">Game Master Role</a></li>
+                <li><a href="#NYA">Observer Role</a></li>
+                <li><a href="#NYA">JTAC Role</a></li>
+                <li><a href="#NYA">1st Person Unit Command</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+   </div>
+
+
+    <div data-role="page" id="ground-units">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Ground Units</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#"><img src2="images/dcs/CA.png" />M1A1</a></li>
+                <li><a href="#"><img src2="images/dcs/CA.png" />Stryker</a></li>
+                <li><a href="#"><img src2="images/dcs/CA.png" />Bradley</a></li>
+                <li><a href="#"><img src2="images/dcs/CA.png" />T80</a></li>
+                <li><a href="#"><img src2="images/dcs/CA.png" />Humvee</a></li>
+                <li><a href="#"><img src2="images/dcs/CA.png" />MANPAD</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+    <div data-role="page" id="SU25T">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#SU25T-checklists">Checklists</a></li>
+                <li><a href="#SU25T-emergencies">Emergencies</a></li>
+                <li><a href="#">Cockpit</a></li>
+                <li><a href="#">Loadouts</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+    <div data-role="page" id="SU25T-checklists">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Checklists</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#SU25T-coldstart">Cold Start & Taxi</a></li>
+                <li><a href="#SU25T-takeoff">Takeoff</a></li>
+                <li><a href="#SU25T-rtb">Return to Base</a></li>
+                <li><a href="#SU25T-landing">Landing</a></li>
+                <li><a href="#SU25T-cannon">Built-in gun</a></li>
+                <li><a href="#SU25T-gunpods">Gun pods</a></li>
+                <li><a href="#SU25T-unguided-bombs">Unguided bombs CCIP
+                    <p>FAB-XXX, RBK-XXX, KMGU-2, BetAB</p>
+                </a></li>
+                <li><a href="#SU25T-guided-bombs">TV guided bombs CCRP
+                    <p>FAB-XXX, RBK-XXX, KMGU-2, BetAB</p>
+                </a></li>
+                <li><a href="#SU25T-unguided-missiles">Unguided missiles
+                    <p>S5, S8, S13, S24, S25</p>
+                </a></li>
+                <li><a href="#SU25T-guided-missiles">Laser guided missiles
+                    <p>Vikhr, 25ML Karen, 29L Kedge</p>
+                </a></li>
+                <li><a href="#SU25T-radar-missiles">Antiradar missiles
+                    <p>25MPU Kegler</p>
+                </a></li>
+                <li><a href="#SU25T-AA-guns">Air-to-air guns</a></li>
+                <li><a href="#SU25T-AA-missiles">Air-to-air missiles
+                    <p>R60 Aphid, R73 Archer</p>
+                </a></li>
+                <li><a href="#SU25T-refuel-rearm">Repair, refuel, rearm</a></li>
+                <li data-role="list-divider">Emergencies</li>
+                <li><a href="#eject">Eject</a></li>
+                <li><a href="#SU25T-engine-fire">Engine fire</a></li>
+                <li><a href="#SU25T-engine-restart">In air engine restart</a></li>
+                <li><a href="#SU25T-jettison-stores">Jettison stores</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+    <div data-role="page" id="SU25T-emergencies">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Emergencies</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#eject">Eject</a></li>
+                <li><a href="#SU25T-engine-fire">Engine fire</a></li>
+                <li><a href="#SU25T-engine-restart">In air engine restart</a></li>
+                <li><a href="#SU25T-jettison-stores">Jettison stores</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+    <div data-role="page" id="airfields">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Airfields</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#airfields-map">
+                    <h2>All Airfields Map</h2>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Anapa">
+                    <div class="airfield-name">Anapa<span class="airfield-FKey">F1</span></div>
+                    <span class="airfield-callsign">URKA</span>
+                    <p class="airfield-frequencies">Tower: 121 Mhz
+
+
+</p>
+                    </a>
+                </li>
+                
+                <li><a href="#airfields-Batumi">
+                    <div class="airfield-name">Batumi<span class="airfield-FKey">F2</span></div>
+                    <span class="airfield-callsign">UGSB</span>
+                    <p class="airfield-frequencies">Tower: 131 Mhz
+ILS:   13 110.3 Mhz
+TACAN: 16X BTM</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Beslan">
+                    <div class="airfield-name">Beslan<span class="airfield-FKey">F3</span></div>
+                    <span class="airfield-callsign">URMO</span>
+                    <p class="airfield-frequencies">Tower: 141 Mhz
+
+</p>
+                    </a>
+                </li>
+                
+                <li><a href="#airfields-Gelendzhik">
+                    <div class="airfield-name">Gelendzhik<span class="airfield-FKey">F4</span></div>
+                    <span class="airfield-callsign">URKG</span>
+                    <p class="airfield-frequencies">Tower: 126 Mhz
+                    
+</p>
+                    </a>
+                </li>
+                
+                <li><a href="#airfields-Gudauta">
+                    <div class="airfield-name">Gudauta</div>
+                    <span class="airfield-callsign">UG23</span>
+                    <p class="airfield-frequencies">Tower: 130 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Kobuleti">
+                    <div class="airfield-name">Kobuleti</div>
+                    <span class="airfield-callsign">UG5X</span>
+                    <p class="airfield-frequencies">Tower: 133 Mhz
+ILS:   07 111.5 Mhz
+TACAN: 67X KBL</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Kutaisi">
+                    <div class="airfield-name">Kutaisi</div>
+                    <span class="airfield-callsign">UGKO</span>
+                    <p class="airfield-frequencies">Tower: 134 Mhz
+ILS:   07 109.75 Mhz
+TACAN: 44X KTS</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Krasnodar1">
+                    <div class="airfield-name">Krasnodar Center</div>
+                    <span class="airfield-callsign">URKL</span>
+                    <p class="airfield-frequencies">Tower: 122 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Krasnodar2">
+                    <div class="airfield-name">Krasnodar Pashkovksy</div>
+                    <span class="airfield-callsign">URKK</span>
+                    <p class="airfield-frequencies">Tower: 128 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Krymsk">
+                    <div class="airfield-name">Krymsk</div>
+                    <span class="airfield-callsign">URKW</span>
+                    <p class="airfield-frequencies">Tower: 124 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Maykop">
+                    <div class="airfield-name">Maykop Khanskaya</div>
+                    <span class="airfield-callsign">URKH</span>
+                    <p class="airfield-frequencies">Tower: 125 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Mineralnye">
+                    <div class="airfield-name">Mineralnye Vody</div>
+                    <span class="airfield-callsign">URMM</span>
+                    <p class="airfield-frequencies">Tower: 135 Mhz
+ILS:   11 111.7 Mhz
+       29 109.3 Mhz</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Mozdok">
+                    <div class="airfield-name">Mozdok</div>
+                    <span class="airfield-callsign">XRMF</span>
+                    <p class="airfield-frequencies">Tower: 137 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Nalchik">
+                    <div class="airfield-name">Nalchik</div>
+                    <span class="airfield-callsign">URMN</span>
+                    <p class="airfield-frequencies">Tower: 136 Mhz
+ILS:   23 110.5 Mhz
+</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Novorossiysk">
+                    <div class="airfield-name">Novorossiysk</div>
+                    <span class="airfield-callsign">URKN</span>
+                    <p class="airfield-frequencies">Tower: 123 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Senaki">
+                    <div class="airfield-name">Senaki</div>
+                    <span class="airfield-callsign">UGKS</span>
+                    <p class="airfield-frequencies">Tower: 132 Mhz
+ILS:   09 108.9 Mhz
+TACAN: 31X TSK</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Sochi">
+                    <div class="airfield-name">Sochi Adler</div>
+                    <span class="airfield-callsign">URSS</span>
+                    <p class="airfield-frequencies">Tower: 127 Mhz
+ILS:   06 111.1 Mhz
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Soganlug">
+                    <div class="airfield-name">Tbilisi Soganlug</div>
+                    <span class="airfield-callsign">UG24</span>
+                    <p class="airfield-frequencies">Tower: 139 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Sukhumi">
+                    <div class="airfield-name">Sukhumi Babushara</div>
+                    <span class="airfield-callsign">UGSS</span>
+                    <p class="airfield-frequencies">Tower: 129 Mhz
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Tbilisi">
+                    <div class="airfield-name">Tbilisi Lochini</div>
+                    <span class="airfield-callsign">UGTB</span>
+                    <p class="airfield-frequencies">Tower: 138 Mhz
+ILS:   12R 110.3 Mhz
+       30L 108.9 Mhz</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Vaziani">
+                    <div class="airfield-name">Vaziani</div>
+                    <span class="airfield-callsign">UG27</span>
+                    <p class="airfield-frequencies">Tower: 140 Mhz
+ILS:   13 108.75 Mhz
+       31 108.75 Mhz
+TACAN: 22X VAS</p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Banodzha">
+                    <div class="airfield-name">Banodzha</div>
+                    <span class="airfield-callsign">&nbsp;</span>
+                    <p class="airfield-frequencies">
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Kvitiri">
+                    <div class="airfield-name">Kvitiri</div>
+                    <span class="airfield-callsign">&nbsp;</span>
+                    <p class="airfield-frequencies">
+                    
+                    </p>
+                    </a>
+                </li>
+
+                <li><a href="#airfields-Ochkhamuri">
+                    <div class="airfield-name">Ochkhamuri</div>
+                    <span class="airfield-callsign">&nbsp;</span>
+                    <p class="airfield-frequencies">
+                    
+                    </p>
+                    </a>
+                </li>
+
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+    
+
+
+    <div data-role="page" id="airfields-map">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Airfield Map</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div role="main">
+            <div class="image-map">
+            <img id="image-map-img" src2="http://snacknack.com/1/images/dcs/AirportsOverview3.svg" />
+            <div class="image-map-hotspots">
+                <a href="#airfields-Anapa" style="left:0%; top:0%; width:10%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Anapa" style="left:0%; top:6%; width:4%; height:6%" class="image-map-link ui-link"></a>
+                <a href="#airfields-Banodzha" style="left:68%; top:69%; width:12%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Batumi" style="left:51%; top:94%; width:12%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Beslan" style="left:87%; top:31%; width:13%; height:9%" class="image-map-link"></a>
+                <a href="#airfields-Gudauta" style="left:37%; top:51%; width:7%; height:10%" class="image-map-link"></a>
+                <a href="#airfields-Gudauta" style="left:40%; top:52%; width:11%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Gelendzhik" style="left:8%; top:17%; width:17%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Kobuleti" style="left:54%; top:84%; width:16%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Kutaisi" style="left:61%; top:78%; width:5%; height:5%" class="image-map-link"></a>
+                <a href="#airfields-Kutaisi" style="left:63%; top:79%; width:13%; height:5%" class="image-map-link"></a>
+                <a href="#airfields-Krasnodar1" style="left:16%; top:0%; width:4%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Krasnodar1" style="left:23%; top:0%; width:14%; height:8%" class="image-map-link"></a>
+                <a href="#airfields-Krymsk" style="left:7%; top:6%; width:12%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Kvitiri" style="left:68%; top:75%; width:12%; height:4%" class="image-map-link"></a>
+                <a href="#airfields-Maykop" style="left:30%; top:9%; width:14%; height:8%" class="image-map-link"></a>
+                <a href="#airfields-Mineralnye" style="left:60%; top:12%; width:12%; height:14%" class="image-map-link"></a>
+                <a href="#airfields-Mineralnye" style="left:64%; top:15%; width:25%; height:7%" class="image-map-link"></a>
+                <a href="#airfields-Mozdok" style="left:80%; top:22%; width:7%; height:10%" class="image-map-link"></a>
+                <a href="#airfields-Mozdok" style="left:83%; top:23%; width:13%; height:7%" class="image-map-link"></a>
+                <a href="#airfields-Nalchik" style="left:70%; top:31%; width:8%; height:13%" class="image-map-link"></a>
+                <a href="#airfields-Nalchik" style="left:72%; top:35%; width:14%; height:8%" class="image-map-link"></a>
+                <a href="#airfields-Novorossiysk" style="left:5%; top:12%; width:20%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Ochkhamuri" style="left:54%; top:90%; width:13%; height:4%" class="image-map-link"></a>
+                <a href="#airfields-Krasnodar2" style="left:20%; top:0%; width:3%; height:6%" class="image-map-link"></a>
+                <a href="#airfields-Krasnodar2" style="left:40%; top:1%; width:17%; height:8%" class="image-map-link"></a>
+                <a href="#airfields-Senaki" style="left:53%; top:72%; width:7%; height:10%" class="image-map-link"></a>
+                <a href="#airfields-Senaki" style="left:58%; top:71%; width:9%; height:7%" class="image-map-link"></a>
+                <a href="#airfields-Sochi" style="left:28%; top:41%; width:9%; height:12%" class="image-map-link"></a>
+                <a href="#airfields-Sochi" style="left:33%; top:42%; width:16%; height:9%" class="image-map-link"></a>
+                <a href="#airfields-Soganlug" style="left:80%; top:84%; width:15%; height:5%" class="image-map-link"></a>
+                <a href="#airfields-Sukhumi" style="left:43%; top:58%; width:7%; height:10%" class="image-map-link"></a>
+                <a href="#airfields-Sukhumi" style="left:48%; top:59%; width:11%; height:5%" class="image-map-link"></a>
+                <a href="#airfields-Tbilisi" style="left:91%; top:77%; width:9%; height:8%" class="image-map-link"></a>
+                <a href="#airfields-Vaziani" style="left:90%; top:90%; width:10%; height:10%" class="image-map-link"></a>
+            </div>   
+            </div> 
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+    <div data-role="page" id="airfields-Anapa">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Anapa</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/a/ad/ANAPA-VITYAZEVO.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/4/4a/URKA-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B059%E2%80%9936%E2%80%9DN,37%C2%B020%E2%80%9919%E2%80%9DE&hl=en&ie=UTF8&ll=45.002104,37.350469&spn=0.018267,0.036006&sll=41.668905,44.956527&sspn=0.019299,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>148 ft (45 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>04 (036&deg;), 22 (216&deg;)<br>9510 ft (2900 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>121 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKA</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°55’36”N<br>41°51’05”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+    <div data-role="page" id="airfields-Batumi">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Batumi</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/d/df/BATUMI.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/9/91/UGSB-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B036%E2%80%9958%E2%80%9DN,41%C2%B035%E2%80%9931%E2%80%9DE&hl=en&ie=UTF8&ll=41.61002,41.602092&spn=0.019316,0.036006&sll=42.244563,42.048969&sspn=0.019125,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>33 ft (10 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>12 (119&deg;), 30 (299&deg;)<br>8050 ft (2450 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>12, 110.30</td>
+                        </tr><tr>
+                          <td>TACAN</td>
+                          <td>16X BTM</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>131 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UGSB</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°36’58”N<br>41°35’31”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+    <div data-role="page" id="airfields-Beslan">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Beslan</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/8/88/BESLAN.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/b/b3/URMO-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=43%C2%B012%E2%80%9926%E2%80%9DN,44%C2%B035%E2%80%9919%E2%80%9DE&hl=en&ie=UTF8&ll=43.203956,44.605737&spn=0.018832,0.036006&sll=34.020479,-118.411732&sspn=0.685213,1.152191&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1771 ft (540 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>09 (093&deg;), 27 (273&deg;)<br>9890 ft (3050 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>141 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URMO</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>43°12’26”N<br>44°35’19”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+    <div data-role="page" id="airfields-Gelendzhik">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Gelendzhik</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/cf/GELENDZHIK.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/b/bb/URKG-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B033%E2%80%9954%E2%80%9DN,38%C2%B000%E2%80%9925%E2%80%9DE&hl=en&ie=UTF8&ll=44.570354,38.014369&spn=0.018405,0.036006&sll=45.002104,37.350469&sspn=0.018267,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>82 ft (25 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>04 (040&deg;), 22 (220&deg;)<br>5905 ft (1800 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>126 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKG</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>44°33’54”N<br>38°00’25”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Gudauta">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Gudauta</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/a/a3/GUDAUTA.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/7a/UG23-APP-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=43%C2%B006%E2%80%9909%E2%80%9DN,40%C2%B034%E2%80%9901%E2%80%9DE&hl=en&ie=UTF8&ll=43.101453,40.581694&spn=0.018863,0.036006&sll=41.929421,41.865335&sspn=0.01922,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>82 ft (25 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>15 (150&deg;), 33 (330&deg;)<br>8200 ft (2500 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>130 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UG23</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>43°06’09”N<br>40°34’01”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Kobuleti">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Kobuleti</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/7c/Kobuleti_Airport_Chart.jpeg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/3/3b/Kobuleti_ARR_DEP_Chart.jpeg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B055%E2%80%9936%E2%80%9DN,41%C2%B051%E2%80%9905%E2%80%9DE&hl=en&ie=UTF8&ll=41.929421,41.865335&spn=0.01922,0.036006&sll=41.928527,41.864004&sspn=0.019221,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>59 ft (18 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>07 (070&deg;), 25 (250&deg;)<br>7870 ft (2400m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>25 111.5 MHz</td>
+                        </tr><tr>
+                          <td>TACAN</td>
+                          <td>67X KBL</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>133 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UG5X</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°55’36”N<br>41°51’05”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Kutaisi">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Kutaisi</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/4/4b/KUTAISI-KOPITNARI.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/e/eb/UGKO-APP-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/9/96/UGKO-ARR.jpg">Approach chart (detail)</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B037%E2%80%9909%E2%80%9DN,45%C2%B002%E2%80%9910%E2%80%9DE&hl=en&ie=UTF8&ll=41.628788,45.039268&spn=0.019311,0.036006&sll=41.648994,44.939833&sspn=0.019305,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>148 ft (45 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>07 (068&deg;), 25 (248&deg;)<br>8200 ft (2500m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>07 109.75 MHz</td>
+                        </tr><tr>
+                          <td>TACAN</td>
+                          <td>44X KTS</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>134 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UGKO</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°37’09”N<br>45°02’10”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Krasnodar1">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Krasnodar Center</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/3/3e/KRASNODAR-CENTER.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/74/URKL-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=45%C2%B005%E2%80%9903%E2%80%9DN,38%C2%B057%E2%80%9934%E2%80%9DE&hl=en&ie=UTF8&ll=45.080824,38.944473&spn=0.018242,0.036006&sll=45.037687,39.169521&sspn=0.036512,0.072012&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>98 ft (30 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>08 (081&deg;), 26 (261&deg;)<br>8200 ft (2500m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>122 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKL</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>45°05’03”N<br>38°57’34”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Krasnodar2">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Krasnodar Pashkovksy</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/f/fc/KRASNODAR-PASHKOVSKY.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/d/d0/URKK-ARR-DEP-4L-22R.jpg">Approach chart 04L-22R</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/0/0d/URKK-ARR-DEP-4R-22L.jpg">Approach chart 04R-22L</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=45%C2%B001%E2%80%9952%E2%80%9DN,39%C2%B008%E2%80%9938%E2%80%9DE&hl=en&ie=UTF8&ll=45.037687,39.169521&spn=0.036512,0.072012&sll=44.681012,40.036969&sspn=0.01837,0.036006&t=h&z=14" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>112 ft (34 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>04R (041&deg;), 22L (221&deg;)<br>10170 ft (3100 m)<br>04L (041&deg;), 22R (221&deg;)<br>7430 ft (2250 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>128 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKK</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>45°01’52”N<br>39°08’38”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Krymsk">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Krymsk</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/a/a8/KRYMSK.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/0/0f/URKW-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B058%E2%80%9927%E2%80%9DN,38%C2%B000%E2%80%9937%E2%80%9DE&hl=en&ie=UTF8&ll=44.962521,38.003039&spn=0.01828,0.036006&sll=44.669279,37.775781&sspn=0.009187,0.018003&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>66 ft (20 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>03 (033&deg;), 22 (213&deg;)<br>8530 ft (2600 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>124 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKW</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>44°58’27”N<br>38°00’37”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Maykop">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Maykop</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/2/2e/MAYKOP-KHANSKAYA.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/cd/URKH-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B041%E2%80%9922%E2%80%9DN,40%C2%B003%E2%80%9908%E2%80%9DE&hl=en&ie=UTF8&ll=44.681012,40.036969&spn=0.01837,0.036006&sll=44.570354,38.014369&sspn=0.018405,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>591 ft (180 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>04 (033&deg;), 22 (213&deg;)<br>10495 ft (3200 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>125 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKH</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>44°41’22”N<br>40°03’08”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Mineralnye">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Mineralnye Vody</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/5/5f/MINERALNYE-VODY.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/cd/URMM-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B012%E2%80%9958%E2%80%9DN,43%C2%B006%E2%80%9913%E2%80%9DE&hl=en&ie=UTF8&ll=44.225336,43.082542&spn=0.037027,0.072012&sll=44.962521,38.003039&sspn=0.01828,0.036006&t=h&z=14" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1050 ft (320 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>11 (109&deg;), 29 (289&deg;)<br>13350 ft (4070 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>11 111.7 MHz<br>29 109.3 MHz</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>135 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URMM</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>44°12’58”N<br>43°06’13”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Mozdok">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Mozdok</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/8/8f/MOZDOK.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/5/5f/XRMF-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=43%C2%B047%E2%80%9926%E2%80%9DN,44%C2%B034%E2%80%9944%E2%80%9DE&hl=en&ie=UTF8&ll=43.782063,44.602604&spn=0.037305,0.072012&sll=43.443105,39.942727&sspn=0.018758,0.036006&t=h&z=14" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>508 ft (155 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>08 (076&deg;), 26 (256&deg;)<br>10235 ft (3120 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>137 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>XRMF</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>43°47’26”N<br>44°34’44”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Nalchik">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Nalchik</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/cf/NALCHIK.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/8/86/URMN-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=43%C2%B030%E2%80%9929%E2%80%9DN,43%C2%B037%E2%80%9930%E2%80%9DE&hl=en&ie=UTF8&ll=43.510713,43.634949&spn=0.018737,0.036006&sll=44.225336,43.082542&sspn=0.037027,0.072012&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1410 ft (430 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>05 (049&deg;), 23 (229&deg;)<br>7545 ft (2300 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>23 110.5 MHz</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>136 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URMN</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>43°30’29”N<br>43°37’30”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Novorossiysk">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Novorossiysk</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/f/f5/NOVOROSSIYSK.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/c7/URKN-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=44%C2%B039%E2%80%9936%E2%80%9DN,37%C2%B046%E2%80%9925%E2%80%9DE&hl=en&ie=UTF8&ll=44.669279,37.775781&spn=0.009187,0.018003&sll=45.080824,38.944473&sspn=0.018242,0.036006&t=h&z=16" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>131 ft (40 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>04 (036&deg;), 22 (216&deg;)<br>5905 ft (1800 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>123 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URKN</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>44°39’36”N<br>37°46’25”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Senaki">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Senaki</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/c/c6/SENAKI-KOLKHI.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/70/UGKS-APP-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=42%C2%B014%E2%80%9931%E2%80%9DN,42%C2%B002%E2%80%9908%E2%80%9DE&hl=en&ie=UTF8&ll=42.244563,42.048969&spn=0.019125,0.036006&sll=41.628788,45.039268&sspn=0.019311,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>43 ft (13 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>09 (088&deg;), 27 (268&deg;)<br>7790 ft (2375 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>09 108.9 Mhz</td>
+                        </tr><tr>
+                          <td>TACAN</td>
+                          <td>31X TSK</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>132 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UGKS</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>42°14’31”N<br>42°02’08”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Sochi">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Sochi Adler</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/0/03/SOCHI-ADLER.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/0/0e/URSS-ARR-DEP-2-20.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=43%C2%B006%E2%80%9917%E2%80%9DN,40%C2%B035%E2%80%9926%E2%80%9DE&hl=en&ie=UTF8&ll=43.443105,39.942727&spn=0.018758,0.036006&sll=43.203956,44.605737&sspn=0.018832,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>98 ft (30 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>06 (056&deg;), 24 (236&deg;)<br>10170 ft (3100 m)<br>02 (020&deg;), 20 (200&deg;)<br>7220 ft (2200 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>06 111.1 Mhz</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>127 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>URSS</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>43°06’17”N<br>40°35’26”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+    <div data-role="page" id="airfields-Soganlug">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Tbilisi Soganlug</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/74/TBILISI-SOGANLUG.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/f/f4/UG24-APP-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B039%E2%80%9926%E2%80%9DN,44%C2%B055%E2%80%9948%E2%80%9DE&hl=en&ie=UTF8&ll=41.648994,44.939833&spn=0.019305,0.036006&sll=43.101453,40.581694&sspn=0.018863,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1473 ft (449 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>13 (126&deg;), 31 (306&deg;)<br>8210 ft (2473 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>139 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UG24</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°39’26”N<br>44°55’48”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Sukhumi">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Sukhumi Babushara</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/b/b4/SUKHUMI-BABUSHARA.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/8/80/UGSS-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=42%C2%B051%E2%80%9921%E2%80%9DN,41%C2%B009%E2%80%9917%E2%80%9DE&hl=en&ie=UTF8&ll=42.861087,41.128693&spn=0.018937,0.036006&sll=41.61002,41.602092&sspn=0.019316,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>30 ft (9 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>11 (110&deg;), 29 (290&deg;)<br>11610 ft (3540 m)</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>129 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UGSS</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>42°51’21”N<br>41°09’17”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Tbilisi">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Tbilisi Lochini</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/1/16/TBILISI-LOCHINI.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/e/e6/UGTB-ARR-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B040%E2%80%9937%E2%80%9DN,44%C2%B056%E2%80%9937%E2%80%9DE&hl=en&ie=UTF8&ll=41.668905,44.956527&spn=0.019299,0.036006&sll=42.861087,41.128693&sspn=0.018937,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1539 ft (469 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>12R (121&deg;), 30L (301&deg;)<br>9580 ft (2920 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>12R 110.3 Mhz<br>30L 108.9 Mhz</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>138 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UGTB</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°40’37”N<br>44°56’37”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Vaziani">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Vaziani</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/7/7c/VAZIANI.jpg">Airport chart</a>
+                </li>
+                <li>
+                    <a href="#image-container" data-img-src="http://wiki.hoggit.us/images/0/0b/UG27-APP-DEP.jpg">Approach chart</a>
+                </li>
+                <li>
+                    <a href="https://maps.google.com/maps?q=41%C2%B040%E2%80%9937%E2%80%9DN,44%C2%B056%E2%80%9937%E2%80%9DE&hl=en&ie=UTF8&ll=41.668905,44.956527&spn=0.019299,0.036006&sll=42.861087,41.128693&sspn=0.018937,0.036006&t=h&z=15" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>1492 ft (455 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>13 (129&deg;), 31 (309&deg;)<br>8150 ft (2485 m)</td>
+                        </tr><tr>
+                          <td>ILS</td>
+                          <td>13 108.75 Mhz<br>31 108.75 Mhz</td>
+                        </tr><tr>
+                          <td>TACAN</td>
+                          <td>22X VAS</td>
+                        </tr><tr>
+                          <td>Tower</td>
+                          <td>140 Mhz</td>
+                        </tr><tr>
+                          <td>Callsign</td>
+                          <td>UG27</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°37’09”N<br>45°02’10”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Banodzha">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Banodzha</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="images/dcs/BANODZHA.png">Airport chart</a>
+                </li>
+                <li>
+                    <a href="https://www.google.com/maps/place/42%C2%B015'54.0%22N+42%C2%B039'24.0%22E/@42.2641,42.6597118,989m/data=!3m1!1e3!4m2!3m1!1s0x0:0x0" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>459 ft (140 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>09 (088&deg;), 27 (268&deg;)<br>3281 ft (1000 m)</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>42°15’54”N<br>42°39’24”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Kvitiri">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Kvitiri</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="images/dcs/KVITIRI.png">Airport chart</a>
+                </li>
+                <li>
+                    <a href="https://www.google.com/maps/place/42%C2%B014'53.0%22N+42%C2%B037'50.0%22E/@42.2515124,42.6251353,1981m/data=!3m1!1e3!4m2!3m1!1s0x0:0x0" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>361 ft (110 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>09 (088&deg;), 27 (268&deg;)<br>3281 ft (1000 m)</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>42°14’53”N<br>42°37’50”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+    <div data-role="page" id="airfields-Ochkhamuri">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Ochkhamuri</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview">
+                <li>
+                    <a href="#image-container" data-img-src="images/dcs/OCHKHAMURI.png">Airport chart</a>
+                </li>
+                <li>
+                    <a href="https://www.google.com/maps/place/41%C2%B050'17.0%22N+41%C2%B048'02.0%22E/@41.8389014,41.7985377,1991m/data=!3m1!1e3!4m2!3m1!1s0x0:0x0" target="map" rel="external">Google Map</a>
+                </li>
+                <li>
+                    <table class="airfield-table">
+                        <tr>
+                          <td>Elevation</td>
+                          <td>33 ft (10 m)</td>
+                        </tr><tr>
+                          <td>Runways</td>
+                          <td>03 (030&deg;), 21 (210&deg;)<br>3281 ft (1000 m)<br>16 (162&deg;), 34 (342&deg;)<br>3281 ft (1000 m)</td>
+                        </tr><tr>
+                          <td>Lat/Lon</td>
+                          <td>41°50’17”N<br>41°48’02”E</td>
+                        </tr>
+                    </table>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+
+
+
+
+    <div data-role="page" id="SU25T-coldstart">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Cold start & Taxi</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Radio: request startup</h1>
+                    <p><i class="key">\</i> Radio</p>
+                    <p><i class="key">F5</i> Ground crew</p>
+                    <p><i class="key">F1</i> Request startup</p>
+                    <p><i class="key">F1</i> Request startup</p>
+                </li>
+                <li>
+                    <h1>APU power on</h1>
+                    <p><i class="key">rs L</i></p>
+                </li>
+                <li>
+                    <h1>Silence RWR</h1>
+                    <p>in case it is already beeping:</p>
+                    <p><i class="key">rs R</i> mute or</p>
+                    <p><i class="key">ra &lt;</i> <i class="key">ra &gt;</i> volume up/down</p>
+                </li>
+                <li>
+                    <h1>Throttles to idle</h1>
+                    <p>otherwise you will flood engines and start a fire.</p>
+                    <p><i class="key">rs End</i> to stop engines</p>
+                </li>
+                <li>
+                    <h1>Start engines</h1>
+                    <p><i class="key">rs Home</i> both engines</p>
+                    <p>left: <i class="key">ra Home</i>, right: <i class="key">rc Home</i></p>
+                </li>
+                <li>
+                    <h1>Wait for engines idle</h1>
+                    <p>will spool higher</p>
+                    <p>wait for 32% RPM</p>
+                </li>
+                <li>
+                    <h1>Radio: Request Taxi to Runway</h1>
+                    <p><i class="key">\</i> Radio</p>
+                    <p><i class="key">F5</i> ATC</p>
+                    <p><i class="key">F1</i> Request Taxi to Runway</p>
+                </li>
+                <li>
+                    <h1>Airport map for taxiway</h1>
+                    <p><i class="key">F10</i></p>
+                    <p><i class="key">rc F8</i> centers on player</p>
+                    <p><i class="key">mousewheel</i> to zoom</p>
+                    <p><a href="#airfields" class="ui-btn ui-corner-all ui-icon-carat-r ui-shadow ui-btn-icon-right dont-bubble">or use maps here</a></p>
+                </li>
+                <li>
+                    <h1>Navigation lights on</h1>
+                    <p><i class="key">rc L</i> until blinking</p>
+                    <p>blinking: "intend to move"</p>
+                    <p>solid: "parked"</p>
+                </li>
+                <li>
+                    <h1>Taxi lights on</h1>
+                    <p><i class="key">ra L</i> once for day, again for night</p>
+                </li>
+                <li>
+                    <h1>Start taxiing</h1>
+                    <p>throttle up briefly, start rolling</p>
+                    <p>throttle back to 40%</p>
+                    <p>keep taxiing speed &lt;30 km/h</p>
+                    <p>must stay on taxiways</p>
+                    <p><i class="key">W</i> wheel brake, hold if needed</p>
+                </li>
+                <li>
+                    <h1>Hold short of runway</h1>
+                    <p>Check runway clear</p>
+                    <p>no inbound traffic</p>
+                </li>
+                <li>
+                    <h1>Request take off</h1>
+                    <p><i class="key">\</i> Radio</p>
+                    <p><i class="key">F1</i></p>
+                    <p>Wait for</p>
+                    <p>"Clear for take off"</p>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+    <div data-role="page" id="SU25T-takeoff">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Take off</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Align on runway</h1>
+                </li>
+                <li>
+                    <h1>Wheel brakes on</h1>
+                    <p>hold <i class="key">W</i> until stopped</p>
+                </li>
+                <li>
+                    <h1>Power up to 75%</h1>
+                </li>
+                <li>
+                    <h1>Release wheel brakes</h1>
+                    <p>release <i class="key">W</i></p>
+                </li>
+                <li>
+                    <h1>Full power</h1>
+                </li>
+                <li>
+                    <h1>Takeoff</h1>
+                    <p>@180 km/h lite, 220 km/h heavy</p>
+                    <p>15 m/s climb rate</p>
+                </li>
+                <li>
+                    <h1>Gear up</h1>
+                    <p><i class="key">G</i></p>
+                </li>
+                <li>
+                    <h1>Radio wingman "airborne"</h1>
+                </li>
+                <li>
+                    <h1>Flaps up</h1>
+                    <p>@330 km/h</p>
+                    <p><i class="key">ls F</i> if landing flaps, <i class="key">F</i> if regular</p>
+                </li>
+                <li>
+                    <h1>Taxi lights off</h1>
+                    <p><i class="key">ra L</i></p>
+                </li>
+                <li>
+                    <h1>Navigation mode to: Enroute</h1>
+                    <p><i class="key">1</i> until "ENR" in HUD</p>
+                </li>
+                <li>
+                    <h1>If needed: select waypoint</h1>
+                    <p><i class="key">lc ~</i></p>
+                </li>
+                <li>
+                    <h1>Cruise speed 550 km/h</h1>
+                    <p>or as indicated</p>
+                    <p>by flight director circle in HUD</p>
+                    <p>above speed</p>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+
+    <div data-role="page" id="SU25T-rtb">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Return to Base</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Navigation mode to: Return</h1>
+                    <p><i class="key">1</i> until "RTN" mode in HUD</p>
+                </li>
+                <li>
+                    <h1>Select airport</h1>
+                     <p><i class="key">ls ~</i></p>
+                     <p>airport ID in HUD</p>
+                </li>
+                <li>
+                    <h1>Radio ATC "request inbound"</h1>
+                     <p><i class="key">\</i> Radio</p>
+                     <p><i class="key">F5</i> ATC control</p>
+                     <p><i class="key">Fx</i> select airport</p>
+                     <p>request inbound</p>
+                </li>
+                <li>
+                    <h1>Follow flight director</h1>
+                    <p>to return waypoint</p>
+                    <p>ignore suggested altitude (buggy)</p>
+                    <p>use 1000-1500m altitude</p>
+                </li>
+                <li>
+                    <h1>Slow to 400 km/h</h1>
+                </li>
+                <li>
+                    <h1>Navigation lights on</h1>
+                    <p><i class="key">rc L</i> until blinking</p>
+                </li>
+                <li>
+                    <h1>Navigation switches to: Landing</h1>
+                    <p>"LNDG" in HUD</p>
+                    <p>automatically over return waypoint</p>
+                </li>
+                <li>
+                    <h1>Prepare for final</h1>
+                    <p>turn towards runway</p>
+                    <p>follow flight director</p>
+                </li>
+                <li>
+                    <h1>Slow to 280 to 320 km/h</h1>
+                </li>
+                <li>
+                    <h1>Gear down</h1>
+                    <p><i class="key">G</i></p>
+                </li>
+                <li>
+                    <h1>Taxi lights on</h1>
+                    <p><i class="key">ra L</i> once for day, again for night</p>
+                </li>
+                <li>
+                    <h1>Flaps</h1>
+                    <p><i class="key">F</i></p>
+                </li>
+                <li>
+                    <h1>Slow to 280 km/h</h1>
+                    <p>keep sink rate to -3/-5 m/s</p>
+                </li>
+                <li>
+                    <h1>Landing Flaps</h1>
+                    <p><i class="key">ls F</i></p>
+                </li>
+                <li>
+                    <h1>Over runway cut power, flare</h1>
+                    <p>cut power to idle</p>
+                    <p><i class="key">B</i> speed brakes</p>
+                    <p>flare</p>
+                    <p>sink rate -3 m/s</p>
+                </li>
+                <li>
+                    <h1>Touchdown:deploy chute, wheel brake</h1>
+                    <p><i class="key">P</i> deploy chute</p>
+                    <p><i class="key">W</i> wheel brakes as needed</p>
+                </li>
+                <li>
+                    <h1>Clean up chute, flaps, air brakes</h1>
+                    <p><i class="key">P</i> to drop chute</p>
+                    <p><i class="key">ls F</i> to retract landing flaps</p>
+                    <p><i class="key">F</i> to retract flaps</p>
+                    <p><i class="key">B</i> to retract speed brakes</p>
+                </li>
+                <li>
+                    <h1>Clear runway</h1>
+                    <p>taxi to parking spot</p>
+                </li>
+                <li>
+                    <h1>Shutdown</h1>
+                    <p><i class="key">rs End</i> shutdown engines or</p>
+                    <p><i class="key">rc End</i> right, <i class="key">ra End</i> left engine</p>
+                    <p><i class="key">lc C</i> canopy must be open</p> 
+                    <p>wait for engine shutdown 0% RPM</p>
+                    <p><i class="key">la '</i> rearm/refuel/repair</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+    <div data-role="page" id="SU25T-landing">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Landing</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Prepare for final</h1>
+                    <p>around 17km out</p>
+                    <p>turn towards runway</p>
+                    <p>follow flight director</p>
+                </li>
+                <li>
+                    <h1>Slow to 280-320 km/h</h1>
+                </li>
+                <li>
+                    <h1>Gear down</h1>
+                    <p><i class="key">G</i></p>
+                </li>
+                <li>
+                    <h1>Taxi lights on</h1>
+                    <p><i class="key">ra L</i> once for day, again for night</p>
+                </li>
+                <li>
+                    <h1>Flaps</h1>
+                    <p><i class="key">F</i></p>
+                </li>
+                <li>
+                    <h1>Slow to 280 km/h</h1>
+                    <p>keep sink rate to -3/-5 m/s</p>
+                </li>
+                <li>
+                    <h1>Landing Flaps</h1>
+                    <p><i class="key">ls F</i></p>
+                </li>
+                <li>
+                    <h1>Over runway cut power, flare</h1>
+                    <p>cut power to idle</p>
+                    <p><i class="key">B</i> speed brakes</p>
+                    <p>flare</p>
+                    <p>sink rate -3 m/s</p>
+                </li>
+                <li>
+                    <h1>Touchdown:chute, wheel brake</h1>
+                    <p><i class="key">P</i> deploy chute</p>
+                    <p><i class="key">W</i> wheel brakes as needed</p>
+                </li>
+                <li>
+                    <h1>Clean up chute, flaps, air brakes</h1>
+                    <p><i class="key">P</i> to drop chute</p>
+                    <p><i class="key">ls F</i> to retract landing flaps</p>
+                    <p><i class="key">F</i> to retract flaps</p>
+                    <p><i class="key">B</i> to retract speed brakes</p>
+                </li>
+                <li>
+                    <h1>Clear runway</h1>
+                    <p>taxi to parking spot</p>
+                </li>
+                <li>
+                    <h1>Shutdown</h1>
+                    <p><i class="key">rs End</i> shutdown engines or</p>
+                    <p><i class="key">rc End</i> right, <i class="key">ra End</i> left engine</p>
+                    <p><i class="key">lc C</i> canopy must be open</p> 
+                    <p>wait for engine shutdown 0% RPM</p>
+                    <p><i class="key">la '</i> rearm/refuel/repair</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+
+    <div data-role="page" id="SU25T-refuel-rearm">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Refuel/Rearm</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Engines off, cockpit open</h1>
+                    <p>on ground, stopped</p>
+                    <p><i class="key">rs End</i> engines off (not just idle)</p>
+                    <p><i class="key">lc C</i> cockpit open</p>
+                </li>
+                <li>
+                    <h1>Request repair</h1>
+                     <p><i class="key">\</i> Radio</p>
+                     <p><i class="key">F8</i> Ground crew</p>
+                     <p><i class="key">F3</i> Request repair</p>
+                     <p>Ground crew: "copy"</p>
+                     <p>Countdown timer starts</p>
+                     <p>repair takes about 3 mins</p>
+                </li>
+                <li>
+                    <h1>Request rearm/refuel</h1>
+                    <p><i class="key">la '</i> rearm/refuel</p>
+                    <p>select stores/fuel</p>
+                </li>
+                <li>
+                    <h1>Tip: if fuel pump is too LOUD</h1>
+                    <p><i class="key">F2</i> external view & zoom out</p>
+                    <p>to reduce annoying sound</p>
+                </li>
+                <li>
+                    <h1>Wait for "rearming complete"</h1>
+                    <p>rearm also provides new drag chute</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+    <div data-role="page" id="SU25T-unguided-bombs">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Unguided Bombs</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Air to Ground mode</h1>
+                    <p><i class="key">7</i></p>
+                    <p>HUD shows IP-GND</p>
+                </li>
+                <li>
+                    <h1>Select Bombs</h1>
+                    <p><i class="key">D</i> to cycle weapons</p>
+                    <p>HUD shows B for bombs</p>
+                </li>
+                <li>
+                    <h1>Select salvo size</h1>
+                    <p><i class="key">lc Space</i> 1/2/4/all</p>
+                    <p>Check cockpit lower left</p>
+                    <p>Weapon system control panel</p>
+                    <p>for salvo size switch setting</p>
+                </li>
+                <li>
+                    <h1>Trim for level flight</h1>
+                    <p>@ 400-500 km/h</p>
+                    <p>zoom in around HUD</p>
+                    <p><i class="key">ls F</i> landing flaps if wanted</p>
+                    <p><i class="key">B</i> air brake if wanted</p>
+                </li>
+                <li>
+                    <h1>Aim & Fire</h1>
+                    <p>reticle over target</p>
+                    <p>Space (and hold!) to mark</p>
+                    <p>HUD will show diamond reticle</p>
+                    <p>HUD shows AM GND</p>
+                </li>
+                <li>
+                    <h1>Keep circle over diamond</h1>
+                    <p>reticle over target</p>
+                    <p>range tape arrow descends</p>
+                    <p>beep sounds</p>
+                    <p>bomb releases automatically</p>
+                    <p>HUD returns to IP GND</p>
+                </li>
+                <li>
+                    <h1>Release trigger</h1>
+                    <p>release Space key</p>
+                </li>
+                <li>
+                    <h1>Retrim plane</h1>
+                    <p>if needed on</p>
+                    <p>asymmetric release</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+    <div data-role="page" id="SU25T-unguided-missiles">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Unguided Missiles</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Air to Ground mode</h1>
+                    <p><i class="key">7</i></p>
+                    <p>HUD shows IP-GND</p>
+                </li>
+                <li>
+                    <h1>Select Missiles</h1>
+                    <p><i class="key">D</i> to cycle weapons</p>
+                    <p>HUD shows S8KOM, S25 for missiles</p>
+                </li>
+                <li>
+                    <h1>Trim for level flight</h1>
+                    <p>@ 400-500 km/h</p>
+                    <p>zoom in around HUD</p>
+                    <p><i class="key">ls F</i> landing flaps if wanted</p>
+                    <p><i class="key">B</i> air brake if wanted</p>
+                </li>
+                <li>
+                    <h1>Watch range tape</h1>
+                    <p>bold tickmarks on HUD range tape</p>
+                    <p>show engagement zone</p>
+                </li>
+                <li>
+                    <h1>Wait for launch authorization</h1>
+                    <p>when range in engagement zone:</p>
+                    <p>"LA" in HUD: launch authorized</p>
+                </li>
+                <li>
+                    <h1>Aim & Fire</h1>
+                    <p><i class="key">Space</i></p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+
+
+    <div data-role="page" id="SU25T-cannon">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Gun</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Air to Ground mode</h1>
+                    <p><i class="key">7</i></p>
+                </li>
+                <li>
+                    <h1>Select built in gun</h1>
+                    <p><i class="key">C</i></p>
+                </li>
+                <li>
+                    <h1>Select Burst mode</h1>
+                    <p><i class="key">ls C</i> burst/full auto mode</p>
+                    <p>HUD shows ammo in quarters from</p>
+                    <p>full: 4,3,2,1,K</p>
+                </li>
+                <li>
+                    <h1>Trim for level flight</h1>
+                    <p>@ 400-500 km/h</p>
+                    <p>zoom in around HUD</p>
+                </li>
+                <li>
+                    <h1>Aim</h1>
+                    <p>aim above target because</p>
+                    <p>gun recoil will kick down</p>
+                </li>
+                <li>
+                    <h1>Watch range tape</h1>
+                    <p>bold tickmarks on HUD range tape</p>
+                    <p>show engagement zone</p>
+                </li>
+                <li>
+                    <h1>Wait for LA</h1>
+                    <p>"LA" in HUD: Launch authorized</p>
+                </li>
+                <li>
+                    <h1>Fire</h1>
+                    <p><i class="key">Space</i></p>
+                    <p>HUD shows ammo in quarters from</p>
+                    <p>full: 4,3,2,1,0</p>
+                </li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+    <div data-role="page" id="SU25T-gunpods">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>SU25T Gun Pods</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Air to Ground mode</h1>
+                    <p><i class="key">7</i></p>
+                    <p>HUD shows IP-GND</p>
+                </li>
+                <li>
+                    <h1>Select cannon</h1>
+                    <p><i class="key">C</i></p>
+                    <p>HUD shows GUNS</p>
+                </li>
+                <li>
+                    <h1>Select salvo size</h1>
+                    <p><i class="key">lc Space</i> 1/2/4/All</p>
+                    <p>Check cockpit lower left</p>
+                    <p>Weapon system control panel</p>
+                    <p>for salvo size switch setting</p>
+                    <p>2 for single set of gun pods</p>
+                    <p>4 for double set of gun pods</p>
+                    <p>All to boresight all guns</p>
+                    <p>HUD shows GNPD</p>
+                    <p>HUD shows ALL for boresighted</p>
+                </li>
+                <li>
+                    <h1>Select Burst mode</h1>
+                    <p><i class="key">ls C</i> burst/full auto mode</p>
+                    <p>HUD shows ammo in quarters from</p>
+                    <p>full: 4,3,2,1,0</p>
+                </li>
+                <li>
+                    <h1>Laser aiming</h1>
+                    <p>optional (else strafe)</p>
+                    <p>Programmed point track mode</p>
+                    <p><i class="key">rs O</i> Laser on</p>
+                    <p>HUD shows LR left of range tape</p>
+                </li>
+                <li>
+                    <h1>Watch range tape</h1>
+                    <p>bold tickmarks on HUD range tape</p>
+                    <p>show engagement zone</p>
+                </li>
+                <li>
+                    <h1>Wait for LA</h1>
+                    <p>"LA" in HUD: Launch authorized</p>
+                </li>
+                <li>
+                    <h1>Aim</h1>
+                </li>
+                <li>
+                    <h1>Fire</h1>
+                    <p><i class="key">Space</i></p>
+                    <p>if laser on, reticle will stay</p>
+                    <p>on initial target</p>
+                    <p>else strafe</p>
+                </li>
+                <li>
+                    <h1>Laser off</h1>
+                    <p><i class="key">ls O</i> to avoid burnout</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+
+    <div data-role="page" id="eject">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Eject</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" class="checklist" data-filter="true">
+                <li>
+                    <h1>Eject</h1>
+                    <p>Cockpit must point up</p>
+                    <p><i class="key">lc E</i> three times !</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
+        </div>
+    </div>
+    
+
+
+
+
+    <div data-role="page" id="glossary">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Glossary</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li>
+                    <h1>A-A</h1>
+                    <p>Air-to-Air</p>
+                </li>
+                <li>
+                    <h1>A-G</h1>
+                    <p>Air-to-Ground</p>
+                </li>
+                <li>
+                    <h1>AAA</h1>
+                    <p>Anti-Aircraft Artillery</p>
+                </li>
+                <li>
+                    <h1>AAP</h1>
+                    <p>Auxiliary Avionics Panel</p>
+                </li>
+                <li>
+                    <h1>AAS</h1>
+                    <p>Air-to-Air Submenu</p>
+                </li>
+                <li>
+                    <h1>ACP</h1>
+                    <p>Armament Control Panel ADF Automatic Direction Finding</p>
+                </li>
+                <li>
+                    <h1>ADF</h1>
+                    <p>Automatic Direction Finder</p>
+                </li>
+                <li>
+                    <h1>ADI</h1>
+                    <p>Attitude Director Indicator cockpit instrument (artificial horizon)</p>
+                </li>
+                <li>
+                    <h1>AGL</h1>
+                    <p>height above ground level (cmp ASL above sea level)</p>
+                </li>
+                <li>
+                    <h1>AGM-65</h1>
+                    <p>Maverick IR/EO self guided</p>
+                </li>
+                <li>
+                    <h1>AGM</h1>
+                    <p>Air-to-Ground Missile</p>
+                </li>
+                <li>
+                    <h1>AH</h1>
+                    <p>Attack Helicopter, for example AH-64 Apache</p>
+                </li>
+                <li>
+                    <h1>AHCP</h1>
+                    <p>Armament HUD Control Panel </p>
+                </li>
+                <li>
+                    <h1>AIM</h1>
+                    <p>Air Intercept Missile</p>
+                </li>
+                <li>
+                    <h1>AIM-9M</h1>
+                    <p>Sidewinder air-to-air missile</p>
+                </li>
+                <li>
+                    <h1>ALO</h1>
+                    <p>Air Liason Officer: senior TACP member attached to a ground unit who functions as primary advisor on air operations</p>
+                </li>
+                <li>
+                    <h1>Alphabet</h1>
+                    <p>NATO Phonetic alphabet:</p><p>A&nbsp;<b>Alpha</b></p><p>B&nbsp;<b>Bravo</b></p><p>C&nbsp;<b>Charlie</b></p><p>D&nbsp;<b>Delta</b></p><p>E&nbsp;<b>Echo</b></p><p>F&nbsp;<b>Foxtrot</b></p><p>G&nbsp;<b>Golf</b></p><p>H&nbsp;<b>Hotel</b></p><p>I&nbsp;<b>India</b></p><p>J&nbsp;<b>Juliet</b></p><p>K&nbsp;<b>Kilo</b></p><p>L&nbsp;<b>Lima</b></p><p>M&nbsp;<b>Mike</b></p><p>N&nbsp;<b>November</b></p><p>O&nbsp;<b>Oscar</b></p><p>P&nbsp;<b>Papa</b></p><p>Q&nbsp;<b>Quebec</b></p><p>R&nbsp;<b>Romeo</b></p><p>S&nbsp;<b>Sierra</b></p><p>T&nbsp;<b>Tango</b></p><p>U&nbsp;<b>Uniform</b></p><p>V&nbsp;<b>Victor</b></p><p>W&nbsp;<b>Whiskey</b></p><p>X&nbsp;<b>X-ray</b></p><p>Y&nbsp;<b>Yankee</b></p><p>Z&nbsp;<b>Zulu</b></p>
+                </li>
+                <li>
+                    <h1>ALT</h1>
+                    <p>Altitude</p>
+                </li>
+                <li>
+                    <h1>AM</h1>
+                    <p>Amplitude Modulation</p>
+                </li>
+                <li>
+                    <h1>AMIL</h1>
+                    <p>Air Mass Impact Line</p>
+                </li>
+                <li>
+                    <h1>AMMS</h1>
+                    <p>Advanced Moving Map System AOA Angle Of Attack</p>
+                </li>
+                <li>
+                    <h1>AMRAAM</h1>
+                    <p>Advanced Medium-Range Air to Air Missile</p>
+                </li>
+                <li>
+                    <h1>Angels 12</h1>
+                    <p>altitude 12000 feet</p>
+                </li>
+                <li>
+                    <h1>AOA</h1>
+                    <p>Angle of Attack</p>
+                </li>
+                <li>
+                    <h1>AOA</h1>
+                    <p>Angle of attack (pitch angle of plane)</p>
+                </li>
+                <li>
+                    <h1>AP</h1>
+                    <p>Armor Piercing</p>
+                </li>
+                <li>
+                    <h1>AP</h1>
+                    <p>Autopilot</p>
+                </li>
+                <li>
+                    <h1>APU</h1>
+                    <p>Auxiliary Power Unit</p>
+                </li>
+                <li>
+                    <h1>AR</h1>
+                    <p>Aerial Refueling</p>
+                </li>
+                <li>
+                    <h1>ARS</h1>
+                    <p>Attitude Reference Symbol ASL Azimuth Steering Line</p>
+                </li>
+                <li>
+                    <h1>ASL</h1>
+                    <p>height above sea level (cmp AGL above ground level)</p>
+                </li>
+                <li>
+                    <h1>ASW</h1>
+                    <p>Anti-submarine warfare</p>
+                </li>
+                <li>
+                    <h1>ATC</h1>
+                    <p>Air traffic control</p>
+                </li>
+                <li>
+                    <h1>ATC</h1>
+                    <p>Air Traffic Control</p>
+                </li>
+                <li>
+                    <h1>ATGM</h1>
+                    <p>Anti-Tank Guided Missile</p>
+                </li>
+                <li>
+                    <h1>AWACS</h1>
+                    <p>Airborne Warning and Control System (E3, a modified Boeing 707) to detect and track mainly airborne targets (cmp JSTARS for ground targets)</p>
+                </li>
+                <li>
+                    <h1>Bandit</h1>
+                    <p>An aircraft identified as enemy, in accordance with theater ID criteria. The term does not necessarily imply direction or authority to engage.</p>
+                </li>
+                <li>
+                    <h1>BATA</h1>
+                    <p>Bullets at Target Altitude BHOT Black Hot</p>
+                </li>
+                <li>
+                    <h1>BDA</h1>
+                    <p>Battle Damage Assessment</p>
+                </li>
+                <li>
+                    <h1>Bingo fuel</h1>
+                    <p>Minimum fuel for a comfortable and safe return to base </p>
+                </li>
+                <li>
+                    <h1>Bird</h1>
+                    <p>Friendly Surface to Air Missile (SAM)</p>
+                </li>
+                <li>
+                    <h1>Blind</h1>
+                    <p>No visual contact with friendly aircraft/ground position; opposite of visual</p>
+                </li>
+                <li>
+                    <h1>BIT</h1>
+                    <p>Built In Test</p>
+                </li>
+                <li>
+                    <h1>Bitching Betty</h1>
+                    <p>automated female voice that provides audible in-cockpit warnings in some fighter aircraft</p>
+                </li>
+                <li>
+                    <h1>Black hot</h1>
+                    <p>on infrared displays: darker = hotter (cmp White hot)</p>
+                </li>
+                <li>
+                    <h1>Black Shark</h1>
+                    <p>nickname for the Ka50 helicopter</p>
+                </li>
+                <li>
+                    <h1>Bogey</h1>
+                    <p>an aircraft that is unidentified.  The aircraft must be identified by some means, visual or electronic, before action can be taken</p>
+                </li>
+                <li>
+                    <h1>Buddy spike</h1>
+                    <p>Friendly aircraft(s) air-to-air indication on radar warning receiver (RWR); to be followed by position, heading, and altitude</p>
+                </li>
+                <li>
+                    <h1>Bugging out</h1>
+                    <p>Separation from that particular engagement/attack/operation; no intent to (direction) re-engage/return</p>
+                </li>
+                <li>
+                    <h1>Bullseye</h1>
+                    <p>special waypoint relative to which other targets are given as heading, offset distance</p>
+                </li>
+                <li>
+                    <h1>Buster</h1>
+                    <p>call to fly at maximum continuous speed</p>
+                </li>
+                <li>
+                    <h1>BVR</h1>
+                    <p>Beyond Visual Range</p>
+                </li>
+                <li>
+                    <h1>CADC</h1>
+                    <p>Central Air Data Computer </p>
+                </li>
+                <li>
+                    <h1>CAM</h1>
+                    <p>Course Aerial</p>
+                </li>
+                <li>
+                    <h1>CAP</h1>
+                    <p>combat air patrol</p>
+                </li>
+                <li>
+                    <h1>CAS</h1>
+                    <p>Calibrated Air Speed </p>
+                </li>
+                <li>
+                    <h1>CAS</h1>
+                    <p>close air support</p>
+                </li>
+                <li>
+                    <h1>CBU-103</h1>
+                    <p>CBU-87 cluster bomb fitted with an INS guidance kit to form a Wind Corrected Munition Dispenser (WCMD) IMU guided not GPS</p>
+                </li>
+                <li>
+                    <h1>CBU-105</h1>
+                    <p>Wind Corrected Munitions Dispenser (WCMD) tail kit version of the CBU-97 Cluster bomb</p>
+                <li>
+                    <h1>CBU-87</h1>
+                    <p>Combined Effects Munitions (CEM) general purpose Cluster bomb</p>
+                </li>
+                <li>
+                    <h1>CBU-97</h1>
+                    <p>1000 lbs unguided anti armour cluster bomb </p>
+                </li>
+                <li>
+                    <h1>CBU</h1>
+                    <p>Cluster Bomb Unit</p>
+                </li>
+                <li>
+                    <h1>CCD</h1>
+                    <p>Charge-Coupled Device</p>
+                </li>
+                <li>
+                    <h1>CCIP</h1>
+                    <p>Continuously Computed <b>Release</b> Point bomb release mode</p>
+                </li>
+                <li>
+                    <h1>CCRP</h1>
+                    <p>Continuously Computed <b>Impact</b> Point bomb release mode</p>
+                </li>
+                <li>
+                    <h1>CDI</h1>
+                    <p>Course deviation indicator</p>
+                </li>
+                <li>
+                    <h1>CDM</h1>
+                    <p>Course Doppler</p>
+                </li>
+                <li>
+                    <h1>CDU</h1>
+                    <p>Central Distribution Unit </p>
+                </li>
+                <li>
+                    <h1>CDU</h1>
+                    <p>Control Display Unit</p>
+                </li>
+                <li>
+                    <h1>CG</h1>
+                    <p>Center of Gravity</p>
+                </li>
+                <li>
+                    <h1>Chaff</h1>
+                    <p>radar countermeasure dispensed from back of plane: essentially a bundle of shredded foil</p>
+                </li>
+                <li>
+                    <h1>Check Six</h1>
+                    <p>reminder to look behind you</p>
+                </li>
+                <li>
+                    <h1>CICU</h1>
+                    <p>Central Interface Control Unit</p>
+                </li>
+                <li>
+                    <h1>Cleared hot</h1>
+                    <p>final message by JTAC to CAS pilot that it is ok to engage enemy</p>
+                </li>
+                <li>
+                    <h1>CM" Combat Mix (Tracer + 5 x Depleted Uranium "API</h1>
+                    <p>armour piercing indenciary) 30mm rounds for A10 GAU-8 cannon</p>
+                </li>
+                <li>
+                    <h1>CMS</h1>
+                    <p>Countermeasure Set</p>
+                </li>
+                <li>
+                    <h1>CMSC</h1>
+                    <p>Countermeasures Set Control</p>
+                </li>
+                <li>
+                    <h1>CMSP</h1>
+                    <p>Countermeasure Set Panel</p>
+                </li>
+                <li>
+                    <h1>CR</h1>
+                    <p>Consent to Release</p>
+                </li>
+                <li>
+                    <h1>Danger close</h1>
+                    <p>message by JTAC to CAS pilot that friendly forces are within close proximity of the target (close is relative to the intended munition to be fired) </p>
+                </li>
+                <li>
+                    <h1>DLZ</h1>
+                    <p>Dynamic Launch Zone</p>
+                </li>
+                <li>
+                    <h1>DMS</h1>
+                    <p>Data management switch on HOTAS joystick</p>
+                </li>
+                <li>
+                    <h1>DP</h1>
+                    <p>Display Page</p>
+                </li>
+                <li>
+                    <h1>DR</h1>
+                    <p>Drift Angle</p>
+                </li>
+                <li>
+                    <h1>DRA</h1>
+                    <p>Dual Rail Adapter</p>
+                </li>
+                <li>
+                    <h1>DRC</h1>
+                    <p>Desired Release Cue</p>
+                </li>
+                <li>
+                    <h1>DSMS</h1>
+                    <p>Digital Stores management system (munition control screen on MFCD)</p>
+                </li>
+                <li>
+                    <h1>DST</h1>
+                    <p>Distance</p>
+                </li>
+                <li>
+                    <h1>DT</h1>
+                    <p>Desired Track</p>
+                </li>
+                <li>
+                    <h1>DTA</h1>
+                    <p>Desired Track Angle</p>
+                </li>
+                <li>
+                    <h1>DTOT</h1>
+                    <p>Desired Time On Target</p>
+                </li>
+                <li>
+                    <h1>DTS</h1>
+                    <p>Data Transfer System</p>
+                </li>
+                <li>
+                    <h1>DTSAS</h1>
+                    <p>Digital Terrain System Application Software </p>
+                </li>
+                <li>
+                    <h1>DTTG</h1>
+                    <p>Desired Time To Go</p>
+                </li>
+                <li>
+                    <h1>EAC</h1>
+                    <p>Enhanced Attitude Control</p>
+                </li>
+                <li>
+                    <h1>EAC</h1>
+                    <p>Enhanced Attitude Control</p>
+                </li>
+                <li>
+                    <h1>ECM</h1>
+                    <p>Electronic countermeasures</p>
+                </li>
+                <li>
+                    <h1>EDP</h1>
+                    <p>Engine Dust Protectors</p>
+                </li>
+                <li>
+                    <h1>EEG</h1>
+                    <p>Electronic Engine Governor </p>
+                </li>
+                <li>
+                    <h1>EFC</h1>
+                    <p>Emergency Flight Control</p>
+                </li>
+                <li>
+                    <h1>EGI</h1>
+                    <p>Embedded GPS INS</p>
+                </li>
+                <li>
+                    <h1>EGT</h1>
+                    <p>Exhaust Gas Temperature </p>
+                </li>
+                <li>
+                    <h1>EHE</h1>
+                    <p>Expected Horizontal Error</p>
+                </li>
+                <li>
+                    <h1>EMI</h1>
+                    <p>Engine monitoring instruments</p>
+                </li>
+                <li>
+                    <h1>EO</h1>
+                    <p>Electro Optical</p>
+                </li>
+                <li>
+                    <h1>ET</h1>
+                    <p>Elapsed Time</p>
+                </li>
+                <li>
+                    <h1>ETA</h1>
+                    <p>Estimated Time of Arrival </p>
+                </li>
+                <li>
+                    <h1>ETP</h1>
+                    <p>Estimated Touchdown Point</p>
+                </li>
+                <li>
+                    <h1>EVE</h1>
+                    <p>Expected Vertical Error</p>
+                </li>
+                <li>
+                    <h1>FA</h1>
+                    <p>Fault Acknowledge</p>
+                </li>
+                <li>
+                    <h1>FAC</h1>
+                    <p>Forward Air Controller</p>
+                </li>
+                <li>
+                    <h1>Falcon</h1>
+                    <p>nickname for the F-16 fighter jet</p>
+                </li>
+                <li>
+                    <h1>FARP</h1>
+                    <p>Forward Arming and Refueling Point </p>
+                </li>
+                <li>
+                    <h1>FEBA</h1>
+                    <p>Forward Edge of Battle</p>
+                </li>
+                <li>
+                    <h1>FEDS</h1>
+                    <p>Firing Evaluation Display System</p>
+                </li>
+                <li>
+                    <h1>Fence-In/Out</h1>
+                    <p>set up cockpit switches to prepare for combat. "fence out" when leaving.</p>
+                </li>
+                
+                <li>
+                    <h1>FLIR</h1>
+                    <p>Forward looking infrared</p>
+                </li>
+                <li>
+                    <h1>FM</h1>
+                    <p>Frequency Modulation</p>
+                </li>
+                <li>
+                    <h1>FOM</h1>
+                    <p>Figure of Merit</p>
+                </li>
+                <li>
+                    <h1>FOV</h1>
+                    <p>Field Of View</p>
+                </li>
+                <li>
+                    <h1>Fox one</h1>
+                    <p>semi-active radar guided missile launch (eg AIM 7 Sparrow)</p>
+                </li>
+                <li>
+                    <h1>Fox three</h1>
+                    <p>fully active missile launch (eg AMRAAM/Phoenix)</p>
+                </li>
+                <li>
+                    <h1>Fox two</h1>
+                    <p>IR guided missile launch (eg AIM 9 Sidewinder)</p>
+                </li>
+                <li>
+                    <h1>FPL</h1>
+                    <p>Flight Plan</p>
+                </li>
+                <li>
+                    <h1>FPM</h1>
+                    <p>Feet per minute (usually for descent rates)</p>
+                </li>
+                <li>
+                    <h1>Frogfoot</h1>
+                    <p>nickname for the SU25 airplane</p>
+                </li>
+                <li>
+                    <h1>FSK</h1>
+                    <p>Function Select Key</p>
+                </li>
+                <li>
+                    <h1>GBL</h1>
+                    <p>Gun Bore Line</p>
+                </li>
+                <li>
+                    <h1>GBU-10" 2000 lb "Paveway</h1>
+                    <p>laser guided for hardened targets</p>
+                </li>
+                <li>
+                    <h1>GBU-12</h1>
+                    <p>laser guided Mk-82s</p>
+                </li>
+                <li>
+                    <h1>GBU-31</h1>
+                    <p>JDAM'd Mk-84's (2000 lbs)</p>
+                </li>
+                <li>
+                    <h1>GBU-38</h1>
+                    <p>JDAM Joint Directed Attack Munition Mk-82s (GPS rather than laser - usable in bad weather) 500 lbs</p>
+                </li>
+                <li>
+                    <h1>GBU</h1>
+                    <p>Guided Bomb Unit</p>
+                </li>
+                <li>
+                    <h1>GCAS" Ground Collision Avoidance System on the A10 ("Pull up, pull up</h1>
+                    <p>GG" Gas Generator</p>
+                </li>
+                <li>
+                    <h1>GMT</h1>
+                    <p>Greenwich Mean Time</p>
+                </li>
+                <li>
+                    <h1>GNSS</h1>
+                    <p>Global Navigation Satellite System </p>
+                </li>
+                <li>
+                    <h1>GPS</h1>
+                    <p>Global positioning system</p>
+                </li>
+                <li>
+                    <h1>GS</h1>
+                    <p>Ground Speed</p>
+                </li>
+                <li>
+                    <h1>HARM</h1>
+                    <p>High-speed Anti-Radiation Missile</p>
+                </li>
+                <li>
+                    <h1>HARS</h1>
+                    <p>Heading Attitude Reference System</p>
+                </li>
+                <li>
+                    <h1>HARS</h1>
+                    <p>Heading Attitude Reference System </p>
+                </li>
+                <li>
+                    <h1>HDG</h1>
+                    <p>Heading</p>
+                </li>
+                <li>
+                    <h1>HEI</h1>
+                    <p>High Explosive Incendiary 30mm rounds for A10 GAU-8 cannon</p>
+                </li>
+                <li>
+                    <h1>HMS</h1>
+                    <p>Helmet Mounted Sight</p>
+                </li>
+                <li>
+                    <h1>HOF</h1>
+                    <p>Height of Function</p>
+                </li>
+                <li>
+                    <h1>Hog</h1>
+                    <p>nickname for the A10 airplane</p>
+                </li>
+                <li>
+                    <h1>HOTAS</h1>
+                    <p>Hands On Throttle and Stick</p>
+                </li>
+                <li>
+                    <h1>HPU</h1>
+                    <p>Horizontal Position Uncertainty HSI Horizontal Situation Indicator HUD Heads Up Display</p>
+                </li>
+                <li>
+                    <h1>HSI</h1>
+                    <p>Horizontal Situation Indicator cockpit instrument</p>
+                </li>
+                <li>
+                    <h1>HUD</h1>
+                    <p>head up display</p>
+                </li>
+                <li>
+                    <h1>Huey</h1>
+                    <p>nickname for the Bell UH-1H helicopter</p>
+                </li>
+                <li>
+                    <h1>IAF</h1>
+                    <p>Initial Approach Fix</p>
+                </li>
+                <li>
+                    <h1>IAM</h1>
+                    <p>Inertially Aided Munition</p>
+                </li>
+                <li>
+                    <h1>IAS</h1>
+                    <p>Indicated air speed from pitot tubes (does not take altitude dependent pressure into account)</p>
+                </li>
+                <li>
+                    <h1>IDM</h1>
+                    <p>Inertial Doppler</p>
+                </li>
+                <li>
+                    <h1>IDS</h1>
+                    <p>Information Display System </p>
+                </li>
+                <li>
+                    <h1>IFF</h1>
+                    <p>Identify Friend or Foe</p>
+                </li>
+                <li>
+                    <h1>IFFCC</h1>
+                    <p>Integrated Flight and Fire Control Computer</p>
+                </li>
+                <li>
+                    <h1>IFR</h1>
+                    <p>Instrument flight rules</p>
+                </li>
+                <li>
+                    <h1>IFV</h1>
+                    <p>Infantry Fighting Vehicle</p>
+                </li>
+                <li>
+                    <h1>ILS</h1>
+                    <p>Instrument landing system</p>
+                </li>
+                <li>
+                    <h1>INS</h1>
+                    <p>Inertial navigation system</p>
+                </li>
+                <li>
+                    <h1>IP</h1>
+                    <p>Initial point for JTAC coordinated attack</p>
+                </li>
+                <li>
+                    <h1>IR</h1>
+                    <p>infrared</p>
+                </li>
+                <li>
+                    <h1>ISR</h1>
+                    <p>intelligence, surveillance, and reconnaissance </p>
+                </li>
+                <li>
+                    <h1>ITT</h1>
+                    <p>Interstage Turbine Temperature</p>
+                </li>
+                <li>
+                    <h1>JDAM</h1>
+                    <p>Joint Directed Attack Munition </p>
+                </li>
+                <li>
+                    <h1>JSTARS</h1>
+                    <p>Joint Surveillance Target Attack Radar System. A Northrop Grumman E8 to detect and track mainly ground units (cmp AWACS for air units)</p>
+                </li>
+                <li>
+                    <h1>JTAC</h1>
+                    <p>Joint Terminal Attack Controller</p>
+                </li>
+                <li>
+                    <h1>JTRS</h1>
+                    <p>Joint Tactical Radio System</p>
+                </li>
+                <li>
+                    <h1>KIAS</h1>
+                    <p>Knots Indicated Airspeed</p>
+                </li>
+                <li>
+                    <h1>LAAP</h1>
+                    <p>Low Altitude Autopilot</p>
+                </li>
+                <li>
+                    <h1>LAR</h1>
+                    <p>Look Aside Ranging</p>
+                </li>
+                <li>
+                    <h1>LASTE</h1>
+                    <p>Low Altitude Safety and Targeting Enhancement system</p>
+                </li>
+                <li>
+                    <h1>LAT</h1>
+                    <p>Latitude</p>
+                </li>
+                <li>
+                    <h1>LDGP</h1>
+                    <p>low drag general purpose bombs</p>
+                </li>
+                <li>
+                    <h1>LGB</h1>
+                    <p>Laser guided bomb</p>
+                </li>
+                <li>
+                    <h1>LLT</h1>
+                    <p>Linear Lead Turn LONG Longitude</p>
+                </li>
+                <li>
+                    <h1>LOS</h1>
+                    <p>Line Of Sight</p>
+                </li>
+                <li>
+                    <h1>LRU</h1>
+                    <p>Line Replaceable Unit</p>
+                </li>
+                <li>
+                    <h1>LWR</h1>
+                    <p>Laser Warning Receiver</p>
+                </li>
+                <li>
+                    <h1>LWS</h1>
+                    <p>Laser Warning System</p>
+                </li>
+                <li>
+                    <h1>LZ</h1>
+                    <p>Landing zone for helicopters LZ hot means under fire</p>
+                </li>
+                <li>
+                    <h1>MANPADS</h1>
+                    <p>Man-Portable Air Defense System</p>
+                </li>
+                <li>
+                    <h1>MAP</h1>
+                    <p>Missed Approach Point</p>
+                </li>
+                <li>
+                    <h1>ME</h1>
+                    <p>Mission Editor</p>
+                </li>
+                <li>
+                    <h1>MFCD</h1>
+                    <p>Multifunction Color Display</p>
+                </li>
+                <li>
+                    <h1>MGRS</h1>
+                    <p>Military Grid Reference System</p>
+                </li>
+                <li>
+                    <h1>MILS</h1>
+                    <p>Abbreviation for milliradian; Bomb/Gun sight settings were expressed in mils, an angular measurement; one degree was equal to 17.45 mils.</p>
+                </li>
+                <li>
+                    <h1>MK-8x</h1>
+                    <p>LDGP low drag general purpose unguided bombs MK-82: 500 lbs,  Mk-84: 2000 lbs</p>
+                </li>
+                <li>
+                    <h1>MMCB</h1>
+                    <p>Master Mode Control Button</p>
+                </li>
+                <li>
+                    <h1>MRB</h1>
+                    <p>Magnetic NDB Bearing MWL Master Warning Light</p>
+                </li>
+                <li>
+                    <h1>MRC</h1>
+                    <p>Minimum Range Cue</p>
+                </li>
+                <li>
+                    <h1>MRFCS</h1>
+                    <p>Manual Reversion Flight Control System on the A10</p>
+                </li>
+                <li>
+                    <h1>MRGS</h1>
+                    <p>Multiple Reference Gunsight</p>
+                </li>
+                <li>
+                    <h1>MRS</h1>
+                    <p>Minimum Range Staple</p>
+                </li>
+                <li>
+                    <h1>MSL</h1>
+                    <p>Mean Sea Level</p>
+                </li>
+                <li>
+                    <h1>Mustang</h1>
+                    <p>nickname for the P51 fighter airplane</p>
+                </li>
+                <li>
+                    <h1>MWS</h1>
+                    <p>Missile Warning System</p>
+                </li>
+                <li>
+                    <h1>NATO</h1>
+                    <p>North Atlantic Treaty Organization NDB Non Directional Beacon</p>
+                </li>
+                <li>
+                    <h1>Nine line</h1>
+                    <p>formal delivery of targeting information by JTAC to CAS pilot: Type 1/2/3 Control is in effect, then <ol><li>IP (Initial point) location</li><li>Heading (IP to target)</li><li>Distance (IP to target)</li><li>Target elevation</li><li>Target Description</li><li>Target Location</li><li>Mark Type (smoke etc.)</li><li>Location of Friendlies</li><li>Egress route</li></ol></p>
+                </li>
+                <li>
+                    <h1>NMSP</h1>
+                    <p>Navigation Mode Select Panel NWS Nosewheel Steering</p>
+                </li>
+                <li>
+                    <h1>NVG</h1>
+                    <p>Night vision goggles (Image intensifier based)</p>
+                </li>
+                <li>
+                    <h1>NVIS</h1>
+                    <p>Night Vision Imaging System</p>
+                </li>
+                <li>
+                    <h1>NWS</h1>
+                    <p>Nose wheel steering</p>
+                </li>
+                <li>
+                    <h1>OEI</h1>
+                    <p>One Engine Inoperative</p>
+                </li>
+                <li>
+                    <h1>ORP</h1>
+                    <p>Optimal Release Point </p>
+                </li>
+                <li>
+                    <h1>OSB</h1>
+                    <p>Option Select Button </p>
+                </li>
+                <li>
+                    <h1>OWC</h1>
+                    <p>Obstacle Warning Cue</p>
+                </li>
+                <li>
+                    <h1>PAC</h1>
+                    <p>Precision Attitude Control aim stabilization system for A10</p>
+                </li>
+                <li>
+                    <h1>PBIL</h1>
+                    <p>Projected Bomb Impact Line </p>
+                </li>
+                <li>
+                    <h1>PBRL</h1>
+                    <p>Projected Bomb Release Line </p>
+                </li>
+                <li>
+                    <h1>Pickle</h1>
+                    <p>bomb(s) away</p>
+                </li>
+                <li>
+                    <h1>PNK" Russian "ПНК</h1>
+                    <p>Aircraft Flight and Navigation system</p>
+                </li>
+                <li>
+                    <h1>PR</h1>
+                    <p>Passive Ranging</p>
+                </li>
+                <li>
+                    <h1>PRF</h1>
+                    <p>Pulse Repetition Frequency</p>
+                </li>
+                <li>
+                    <h1>PrPNK" Russian "ПрПНК</h1>
+                    <p>Aircraft Targeting, Flight and Navigation System</p>
+                </li>
+                <li>
+                    <h1>RAIM</h1>
+                    <p>Receiver Autonomous Integrity Monitoring </p>
+                </li>
+                <li>
+                    <h1>RALT</h1>
+                    <p>Radar Altitude</p>
+                </li>
+                <li>
+                    <h1>RB</h1>
+                    <p>Radio Bearing</p>
+                </li>
+                <li>
+                    <h1>RGS</h1>
+                    <p>Required Ground Speed </p>
+                </li>
+                <li>
+                    <h1>RIAS</h1>
+                    <p>Required Indicated Airspeed </p>
+                </li>
+                <li>
+                    <h1>Rifle</h1>
+                    <p>missile away</p>
+                </li>
+                <li>
+                    <h1>RIO</h1>
+                    <p>Navy Radar Intercept Officer backseater </p>
+                </li>
+                <li>
+                    <h1>RMI</h1>
+                    <p>Radio Magnetic Indicator</p>
+                </li>
+                <li>
+                    <h1>ROC</h1>
+                    <p>Rate of climb</p>
+                </li>
+                <li>
+                    <h1>ROE</h1>
+                    <p>Rules of engagement</p>
+                </li>
+                <li>
+                    <h1>ROF</h1>
+                    <p>Rate Of Fire</p>
+                </li>
+                <li>
+                    <h1>RPM</h1>
+                    <p>Revolutions Per Minute</p>
+                </li>
+                <li>
+                    <h1>RTAS</h1>
+                    <p>Required True Airspeed </p>
+                </li>
+                <li>
+                    <h1>RTB</h1>
+                    <p>Return To Base</p>
+                </li>
+                <li>
+                    <h1>RWR</h1>
+                    <p>Radar warning receiver</p>
+                </li>
+                <li>
+                    <h1>RWR</h1>
+                    <p>Radar Warning Receiver</p>
+                </li>
+                <li>
+                    <h1>SADL</h1>
+                    <p>Situational Awareness Datalink SAI Standby Attitude Indicator</p>
+                </li>
+                <li>
+                    <h1>SAI</h1>
+                    <p>Stand-by Attitude Indicator SAM Surface-to-Air Missile</p>
+                </li>
+                <li>
+                    <h1>SAM</h1>
+                    <p>Surface to air missile</p>
+                </li>
+                <li>
+                    <h1>SAR</h1>
+                    <p>Synthetic Aperture Radar</p>
+                </li>
+                <li>
+                    <h1>SAS</h1>
+                    <p>Stability Augmentation System on the A10</p>
+                </li>
+                <li>
+                    <h1>SEAD</h1>
+                    <p>Suppression of enemy air defense mission</p>
+                </li>
+                <li>
+                    <h1>SER</h1>
+                    <p>Single Ejector Rack on an A10</p>
+                </li>
+                <li>
+                    <h1>SERE</h1>
+                    <p>Survival, Evasion, Resistance, and Escape pilot training</p>
+                </li>
+                <li>
+                    <h1>Shack</h1>
+                    <p>ground target destroyed (cmp Splash air target)</p>
+                </li>
+                <li>
+                    <h1>SOI</h1>
+                    <p>Sensor of Interest</p>
+                </li>
+                <li>
+                    <h1>Sparkle</h1>
+                    <p>Target marking by IR pointer; target marking by gunship or forward air controller (airborne) (FAC-A) using incendiary rounds</p>
+                </li>
+                <li>
+                    <h1>SPI</h1>
+                    <p>Sensor Point of Interest</p>
+                </li>
+                <li>
+                    <h1>Spike</h1>
+                    <p>missile detected: RWR indication of an AI threat in track, launch, or unknown mode; include bearing, clock position, and threat type, if known</p>
+                </li>
+                <li>
+                    <h1>SPJ</h1>
+                    <p>Self Protection Jammer</p>
+                </li>
+                <li>
+                    <h1>Splash</h1>
+                    <p>enemy aircraft shot down (cmp Shank ground target)</p>
+                </li>
+                <li>
+                    <h1>SRU</h1>
+                    <p>Shop Replaceable Unit</p>
+                </li>
+                <li>
+                    <h1>STP</h1>
+                    <p>Steerpoint</p>
+                </li>
+                <li>
+                    <h1>Strike Eagle</h1>
+                    <p>nickname for the F-15 fighter jet</p>
+                </li>
+                <li>
+                    <h1>TACAN</h1>
+                    <p>Tactical Air Navigation system</p>
+                </li>
+                <li>
+                    <h1>TACP</h1>
+                    <p>Tactical air control party</p>
+                </li>
+                <li>
+                    <h1>TAD</h1>
+                    <p>Tactical awareness display (map display on MFCD)</p>
+                </li>
+                <li>
+                    <h1>TADS</h1>
+                    <p>Target acquisition and designation sight in an AH-64 Apache helicopter</p>
+                </li>
+                <li>
+                    <h1>Tally X</h1>
+                    <p>Sighting of a target, bandit, bogey, or enemy position; opposite of "no joy"</p>
+                </li>
+                <li>
+                    <h1>TAS</h1>
+                    <p>True Airspeed</p>
+                </li>
+                <li>
+                    <h1>TCA</h1>
+                    <p>True Track Angle </p>
+                </li>
+                <li>
+                    <h1>TDC</h1>
+                    <p>Target Designation Cursor TER Triple Ejector Rack</p>
+                </li>
+                <li>
+                    <h1>TER</h1>
+                    <p>Triple Ejector Rack (up to 3 per A10)</p>
+                </li>
+                <li>
+                    <h1>TGP</h1>
+                    <p>Targeting pod</p>
+                </li>
+                <li>
+                    <h1>TH</h1>
+                    <p>True Heading </p>
+                </li>
+                <li>
+                    <h1>TISL</h1>
+                    <p>Target identification set laser</p>
+                </li>
+                <li>
+                    <h1>TISL</h1>
+                    <p>Target Identification Set Laser</p>
+                </li>
+                <li>
+                    <h1>TMS</h1>
+                    <p>Target Management Switch </p>
+                </li>
+                <li>
+                    <h1>TMS</h1>
+                    <p>Target management switch on HOTAS joystick</p>
+                </li>
+                <li>
+                    <h1>TOF</h1>
+                    <p>Time of Fall / Time of Flight</p>
+                </li>
+                <li>
+                    <h1>TOT</h1>
+                    <p>Time on target</p>
+                </li>
+                <li>
+                    <h1>TOW</h1>
+                    <p>Takeoff Weight </p>
+                </li>
+                <li>
+                    <h1>TP</h1>
+                    <p>Target Point</p>
+                </li>
+                <li>
+                    <h1>TP</h1>
+                    <p>Training Practice 30mm rounds for A10 GAU-8 cannon</p>
+                </li>
+                <li>
+                    <h1>Troops in contact</h1>
+                    <p>message by JTAC to CAS pilot that friendly troops actively engaged with enemy at target area</p>
+                </li>
+                <li>
+                    <h1>TTG</h1>
+                    <p>Time To Go</p>
+                </li>
+                <li>
+                    <h1>TTRN</h1>
+                    <p>Time to Release Numeric TVV Total Velocity Vector</p>
+                </li>
+                <li>
+                    <h1>TV</h1>
+                    <p>Television</p>
+                </li>
+                <li>
+                    <h1>TVM</h1>
+                    <p>Television Monitor</p>
+                </li>
+                <li>
+                    <h1>TVV" Total velocity Vector</h1>
+                    <p>UAS" Unmanned air system</p>
+                </li>
+                <li>
+                    <h1>UAV</h1>
+                    <p>Unmanned aerial vehicle</p>
+                </li>
+                <li>
+                    <h1>UCAV</h1>
+                    <p>Unmanned Combat Aerial Vehicle, a UAV that is capable of carrying weapons</p>
+                </li>
+                <li>
+                    <h1>UFC</h1>
+                    <p>Up front controller keypad</p>
+                </li>
+                <li>
+                    <h1>Unable</h1>
+                    <p>Cannot comply as requested/directed (cmp wilco)</p>
+                </li>
+                <li>
+                    <h1>UHF</h1>
+                    <p>Ultra High Frequency</p>
+                </li>
+                <li>
+                    <h1>UTC</h1>
+                    <p>Coordinated Universal Time</p>
+                </li>
+                <li>
+                    <h1>VFR</h1>
+                    <p>Visual Flight Rules</p>
+                </li>
+                <li>
+                    <h1>VHF</h1>
+                    <p>Very High Frequency</p>
+                </li>
+                <li>
+                    <h1>VMU</h1>
+                    <p>Voice Message Unit</p>
+                </li>
+                <li>
+                    <h1>VNAV</h1>
+                    <p>Vertical Navigation</p>
+                </li>
+                <li>
+                    <h1>VOR</h1>
+                    <p>VHF Omnidirectional Range</p>
+                </li>
+                <li>
+                    <h1>VPU</h1>
+                    <p>Vertical Position Uncertainty </p>
+                </li>
+                <li>
+                    <h1>VVI</h1>
+                    <p>Vertical velocity indicator</p>
+                </li>
+                <li>
+                    <h1>Warthog</h1>
+                    <p>nickname for the A10 airplane</p>
+                </li>
+                <li>
+                    <h1>WCMD</h1>
+                    <p>Wind Corrected Munitions Dispenser</p>
+                </li>
+                <li>
+                    <h1>WCN</h1>
+                    <p>Warning, Caution, and Notes</p>
+                </li>
+                <li>
+                    <h1>WCS</h1>
+                    <p>Weapon Control System WPT Waypoint</p>
+                </li>
+                <li>
+                    <h1>White hot</h1>
+                    <p>on infrared display: brighter = hotter (cmp Black hot)</p>
+                </li>
+                <li>
+                    <h1>Wilco</h1>
+                    <p>Will comply (cmp unable)</p>
+                </li>
+                <li>
+                    <h1>Winchester</h1>
+                    <p>No ordnance remaining</p>
+                </li>
+                <li>
+                    <h1>WP</h1>
+                    <p>Waypoint</p>
+                </li>
+                <li>
+                    <h1>WSO</h1>
+                    <p>Weapons systems officer, Air Force equivalent of the Navy Radar Intercept Officer (RIO).  In the F-15E, the backseater </p>
+                </li>
+                <li>
+                    <h1>XTE</h1>
+                    <p>Cross Track Error</p>
+                </li>
+           </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+    
+
+
+
+<!-- 
+    <div data-role="page" id="maps-Anapa">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Anapa</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div role="main">
+            <img src="" data-load-later="08 copy.svg" style="height: 1286px;" />
+        </div>
+        <div data-role="footer" data-theme="a" 
+             data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+ -->
+
+    <div data-role="page" id="edit-note">
+        <div data-role="header" data-theme="a">
+            <h1>Your notes</h1>
+            <a href="#" data-icon="delete" data-rel="back" class="ui-btn-right" data-iconpos="notext" id="delete-note"></a>
+        </div>
+        <div data-role="content">
+            <p>Re: <span id="edit-note-for-page"></span></p>
+            <textarea cols="40" rows="8" name="page-notes" id="page-notes"></textarea>
+            <fieldset class="ui-grid-a">
+                <div class="ui-block-b">
+                    <a href="#" class="ui-btn ui-corner-all ui-btn-a ui-shadow" data-rel="back">Cancel</a>
+                </div>
+                <div class="ui-block-b">
+                    <a href="#" class="ui-btn ui-corner-all ui-btn-b ui-shadow" data-rel="back" id="save-note">Save</a>
+                </div>
+            </fieldset>
+        </div>
+    </div>
+
+
+    <div data-role="page" id="view-all-notes">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>All notes</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true" id="all-notes">
+            </ul>
+        </div>
+    </div>
+    
+    
+    <div data-role="page" id="view-all-favs">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>All Favs</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true" id="all-favs">
+            </ul>
+        </div>
+    </div>
+
+
+    
+    <div data-role="page" id="image-container">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1 id="image-container-title">Map</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div role="main" height="100%">
+            <img src="" style="max-width: 100%;max-height: 95%;" id="image-container-src"/>
+        </div>
+    </div>
+    
+    
+    
+    <div data-role="page" id="settings">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Settings</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <div class="ui-field-contain">
+                <label for="speak-checklists">Speak checklists:</label>
+                    <select name="speak-checklists" id="speak-checklists" data-role="slider">
+                        <option value="off">No</option>
+                        <option value="on">Yes</option>
+                    </select>
+            </div>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+    
+    <div data-role="page" id="NYA">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Not yet...</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <h3>Sorry, this section is not yet available...</h3>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+    
+    <div data-role="page" id="calculators">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Calculators</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <ul data-role="listview" data-filter="true">
+                <li><a href="#spoken-calculator">Spoken</a></li>
+                <li data-role="list-divider">Distances</li>
+                <li><a href="#m2ft-calculator">Metric to Imperial</a></li>
+                <li><a href="#m2nm-calculator">Meters to nm</a></li>
+                <li><a href="#ft2m-calculator">Imperial to Metric</a></li>
+                <li data-role="list-divider">Speeds</li>
+                <li><a href="#kmh2k-calculator">km/h to knots</a></li>
+                <li><a href="#k2kmh-calculator">knots to km/h</a></li>
+            </ul>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+
+
+
+
+    <div data-role="page" id="spoken-calculator">
+        <div data-role="header" data-theme="a">
+            <a data-rel="back">Back</a>
+            <h1>Calculator</h1>
+            <a href="index.html">Home</a>
+        </div>
+        <div data-role="content">
+            <form>
+                <label for="spoken-calc-query">Type or use your microphone to speak a conversion query into this field</label>
+                <input type="text" name="spoken-calc-query" id="spoken-calc-query" value=""
+                placeholder="17 kilometers in miles">
+                <input type="submit" value="Convert">
+                <p>Examples:</p>
+                <ul>
+                    <li>eight miles in kilometers</li>
+                    <li>240 knots to km/h</li>
+                    <li>six meters per second to feet per minute</li>
+                </ul>
+            </form>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+        </div>
+    </div>
+    <script>
+    $("#spoken-calculator form").on("submit", function(event) {
+        var url = 'https://www.google.com/search?q=' + encodeURIComponent($('#spoken-calc-query').val());
+        window.open( url, 'calc'); 
+        event.preventDefault();
+    });
+    </script>
+
+
+    
+</body>
+</html>
