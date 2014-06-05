@@ -170,6 +170,7 @@ Some notes:
     </div>
 ```
 
+
     Copy and paste that whole thing into the page.
     Leaving the header and footer unchanged, it should be fairly obvious how to edit
     content for your own new checklist. Make sure you also change the page name
@@ -197,6 +198,7 @@ Some notes:
                 <li><a href="#SU25T-rtb">Return to Base</a></li>
                ....more checklist items here...
 ```
+
 
     Just find a spot to insert your checklist and copy paste a line from
     above and change the href to your checklist name and the displayed
