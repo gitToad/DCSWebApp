@@ -107,6 +107,8 @@ Some notes:
 - I purposely kept the amount of graphics, icons etc minimal to reduce load and browser
   memory requirements. Currently most airfield charts link out to the hoggit server
   (which reminds me I need to add third party credits)
+
+- jquery and jquery mobile libraries are loaded from their CDN (ie not included in the sources here)
   
 - again, I'd like to make this available for non coders/CS engineers to extend. There are plenty
   of very knowledgable and helpful DCS users and I would like to make and keep it possible for 
