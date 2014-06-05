@@ -122,7 +122,7 @@ Some notes:
   Here the page name for the Repair/rearm/refuel checklist would be "SU25T-refuel-rearm". 
   Just find that in the page HTML source code, and you will see:
   
-```javascript
+```html
     <div data-role="page" id="SU25T-refuel-rearm">
         <div data-role="header" data-theme="a">
             <a data-rel="back">Back</a>
