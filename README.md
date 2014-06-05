@@ -122,7 +122,7 @@ Some notes:
   Here the page name for the Repair/rearm/refuel checklist would be "SU25T-refuel-rearm". 
   Just find that in the page HTML source code, and you will see:
   
-  
+```html
     <div data-role="page" id="SU25T-refuel-rearm">
         <div data-role="header" data-theme="a">
             <a data-rel="back">Back</a>
@@ -168,7 +168,8 @@ Some notes:
             <a href="#" data-role="button" data-icon="back" class="checklist-reset footer-button">Reset</a>
         </div>
     </div>
-    
+```
+
     Copy and paste that whole thing into the page.
     Leaving the header and footer unchanged, it should be fairly obvious how to edit
     content for your own new checklist. Make sure you also change the page name
@@ -181,7 +182,8 @@ Some notes:
     http://snacknack.com/1/index.html#SU25T-checklists
     
     Find "SU25T-checklists" and you will see 
-    
+
+```html
         <div data-role="page" id="SU25T-checklists">
         <div data-role="header" data-theme="a">
             <a data-rel="back">Back</a>
@@ -194,7 +196,8 @@ Some notes:
                 <li><a href="#SU25T-takeoff">Takeoff</a></li>
                 <li><a href="#SU25T-rtb">Return to Base</a></li>
                ....more checklist items here...
-    
+```
+
     Just find a spot to insert your checklist and copy paste a line from
     above and change the href to your checklist name and the displayed
     text to something descriptive and you are done:
