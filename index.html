@@ -7,20 +7,18 @@
     <!-- https://developer.apple.com/library/safari/documentation/appleapplications/reference/SafariHTMLRef/Articles/MetaTags.html -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     
-    <!-- more hocus pocus: for IOS home screen launched windows, show a nice splash screen while we are waiting for the app 
-        https://developer.apple.com/library/ios/documentation/AppleApplications/Reference/SafariWebContent/ConfiguringWebApplications/ConfiguringWebApplications.html
+    <!--         https://developer.apple.com/library/ios/documentation/AppleApplications/Reference/SafariWebContent/ConfiguringWebApplications/ConfiguringWebApplications.html
         
         need to add to these icons (craaayzy many now) see http://www.mobilexweb.com/blog/safari-ios7-html5-problems-apis-review
         76, 120, 144, 152 
-    -->
     <link rel="apple-touch-icon" href="images/ios/touch-icon.png">
     <link rel="apple-touch-icon" sizes="57x57" href="images/ios/touch-icon-57.png">
     <link rel="apple-touch-icon" sizes="72x72" href="images/ios/touch-icon-72.png">
     <link rel="apple-touch-icon" sizes="114x114" href="images/ios/touch-icon-114.png">
-    
-    <link href="http://code.jquery.com/mobile/1.4.2/jquery.mobile-1.4.2.min.css" rel="stylesheet">
+    -->
+
+    <link href="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.css" rel="stylesheet">
     <script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
     
     <script type="text/javascript">
@@ -31,120 +29,741 @@
         });
 
     </script>
-    <script src="http://code.jquery.com/mobile/1.4.2/jquery.mobile-1.4.2.min.js"></script>
+    <script src="http://code.jquery.com/mobile/1.4.3/jquery.mobile-1.4.3.min.js"></script>
     
     
-    <script>
-        var editingNotesForPage;
-        var $meta = $("META[name=viewport]");
+    <script>       
         
-        var settings;
-        function restoreSettings()
-        {
-            settings = localStorage.getItem( "settings" );
-            if( !settings )
+        // -----------------------------------------------------------------------------------------
+        // allows scribbling on images
+        // in an object to collect various vars, methods
+        // not fully factored (UI related stuff for buttons etc in initialize, handleToolButtonPress,
+        // and tools themselves not factored etc.) Not meant to be perfect (yet ;) just better than
+        // a bunch of globals.
+        var scribbler = {
+            canvas: null,
+            context: null,
+            currentTool: null,
+            currentScribbles: null,
+            currentKey: null,
+            doRedrawTimer: null,
+            currentColor: "#F00",
+            currentWidth: 4,
+            capturingMouse: false,
+            
+            // various function to do scribbling on top of images in airfield maps
+            initialize: function()
             {
-                settings = { "speakChecklists": true };
-                persistSettings();
+                $canvas = $("#image-canvas");
+                this.canvas = $canvas[0];
+                this.context = this.canvas.getContext("2d");
+                $canvas.on( "vmousedown", $.proxy( this.mousedown, this ) );
+                $canvas.on( "vmousemove", $.proxy( this.mousemove, this ) );
+                $canvas.on( "vmouseup",   $.proxy( this.mouseup, this ) );
+
+                // this is a cheesy way to allow scaling of the image on desktops
+                // which does not affect tablets, phones (since no mousewheel)
+                // However no scroll bars, weird interaction w vertical scrolling
+                // need something better here...
+                $("#image-container").on( "wheel", function( event ) {
+                    var $img = $("#image-container-src");
+                    var max = (parseInt($img.css("max-width")) + event.originalEvent.wheelDelta/120) + "%";
+                    $img.css( "max-width", max ).css( "max-height", max );
+                    scribbler.resize(); // will resize the canvas on top
+                });
+                
+                // for analogous handling of pan/zoom using 1|2 finger gestures on mobiles:
+                // bind touchdown, touchmove events
+                // check for event.targetTouches.length == 1|2
+                // exec move or zoom code accordingly
+                // these touch events only get executed on touch enabled devices,
+                // not triggered on desktops with mice
+                // maybe also do a double tap to reset zoom/pan ? Disambig w tool down ??
+                
+                $( ".scribbler-draw-btn" ).on( "click", function() {
+                    if( !scribbler.handleToolButtonPress( this ) )
+                        scribbler.selectTool( "pen" );
+                });
+                $( ".scribbler-mark-btn" ).on( "click", function() {
+                    if( !scribbler.handleToolButtonPress( this ) )
+                        scribbler.selectTool( "mark" );
+                });
+                $( ".scribbler-wipe-btn" ).on( "click", function() {
+                    scribbler.wipe();
+                });
+                $( ".scribbler-undo-btn" ).on( "click", function() {
+                    scribbler.undo();
+                });
+                $( ".scribbler-color-swatch" ).on( "click", function() {
+                    scribbler.currentColor = this.style.backgroundColor;
+                    $(this).parent().popup('close');
+                });
+            },
+            
+            handleToolButtonPress: function( button )
+            {
+                event.preventDefault();
+                $this = $(button);
+                var $otherToolButtons = $this.parent().find(".scribbler-tool-btn");
+                if( $this.hasClass("ui-btn-active") )
+                {
+                    scribbler.selectTool( null );
+                    $otherToolButtons.removeClass("ui-btn-active");
+                    return true;
+                }
+                $otherToolButtons.removeClass("ui-btn-active");
+                $this.addClass("ui-btn-active");
+                return false;
+            },
+            
+            _getEventMouseLocation: function( event )
+            {
+                var $canvasLeftTop = $(this.canvas).offset();
+                return {x: (event.pageX-$canvasLeftTop.left)/this.canvas.width, 
+                        y: (event.pageY-$canvasLeftTop.top)/this.canvas.height};
+            },
+            
+            mousedown: function( event )
+            {
+                if( !this.currentTool )
+                    return;
+                            
+                if( this.currentTool==="pen" )
+                {
+                    var loc = this._getEventMouseLocation( event );
+                    this.currentScribbles.push(
+                        {
+                            type: "line",
+                            width: this.currentWidth,
+                            style: this.currentColor,
+                            points: [loc, loc]
+                        }
+                    );
+                }
+                if( this.currentTool==="mark" )
+                {
+                    this.currentScribbles.push(
+                        {
+                            type: "marker",
+                            icon: "circle",
+                            style: this.currentColor,
+                            location: this._getEventMouseLocation( event )
+                        }
+                    );
+                }
+                this.draw();
+                this.capturingMouse = true;
+                event.preventDefault();
+            },
+            
+            mousemove: function( event )
+            {
+                if( !this.currentTool || !this.capturingMouse )
+                    return;
+
+                if( this.currentTool==="pen" )
+                {
+                    var points = this.currentScribbles[this.currentScribbles.length-1].points;
+                    var lastPoint = points[points.length-1];
+                    var currentPoint = this._getEventMouseLocation( event );
+                    if( Math.abs(lastPoint.x-currentPoint.x)>0.001 || Math.abs(lastPoint.y-currentPoint.y)>0.001 )
+                    {
+                        points.push( currentPoint );
+                    }
+                    else
+                    {
+                        lastPoint = currentPoint;
+                    }
+                }
+                if( this.currentTool==="mark" )
+                {
+                    this.currentScribbles[this.currentScribbles.length-1].location = this._getEventMouseLocation( event );
+                }
+                this.draw();
+                event.preventDefault();
+            },
+            
+            mouseup: function( event )
+            {
+                if( !this.currentTool || !this.capturingMouse )
+                    return;
+                    
+                this.persistScribbles( this.currentKey, this.currentScribbles ); // record new object to persistent storage
+                this.capturingMouse = false;
+                event.preventDefault();
+            },
+            
+            pageShow: function()
+            {
+                this.currentKey = this._key();
+                var scribbles = this.restoreScribbles( this.currentKey );
+                /*
+                // debug only
+                scribbles = [
+                    {
+                        type: "line",
+                        width: 10,
+                        style: "#FF0000",
+                        points: [{x:0,y:0}, {x:.5,y:.5}, {x:.2,y:.5}, {x:.7,y:.2}]
+                    },
+                    {
+                        type: "line",
+                        width: 5,
+                        style: "#006600",
+                        points: [{x:.8,y:.8}, {x:.2,y:.8}, {x:.2,y:.4}, {x:.8,y:.8}]
+                    },
+                    {
+                        type: "marker",
+                        icon: "pin",
+                        style: "#FFFF00",
+                        location: {x:.1,y:.9}
+                    }
+                ];
+                // end debug
+                */
+                
+                this.currentScribbles = scribbles || [];
+                
+                this.draw();
+            },
+            
+            wipe: function()
+            {
+                this.currentScribbles = [];
+                this.removeScribbles( this.currentKey );
+                this.draw();
+            },
+            
+            undo: function()
+            {
+                this.currentScribbles.pop();
+                this.persistScribbles( this.currentKey, this.currentScribbles );
+                this.draw();
+            },
+            
+            selectTool: function( tool )
+            {
+                this.currentTool = tool;
+            },
+            
+            _key: function()
+            {
+                var id = $("#image-container-src").attr( "src" );
+                id = id.substr( id.lastIndexOf( "/")+1 ).replace( /[^a-zA-Z0-9_]/g, '_' );
+                return "scribbles_" + id;
+            },
+    
+            restoreScribbles: function( pageID )
+            {
+                return $.parseJSON(localStorage.getItem( pageID )); // null stays null here
+            },
+    
+            persistScribbles: function( pageID, scribbles )
+            {
+                localStorage.setItem( pageID, JSON.stringify( scribbles ) );
+            },
+    
+            removeScribbles: function( pageID )
+            {
+                localStorage.removeItem( pageID );
+            },
+            
+            resize: function()
+            {
+                // dont do all this work if user still resizing wildly. 
+                // wait until user done (x ms without movement)
+                if( this.doRedrawTimer )
+                    clearTimeout( this.doRedrawTimer );
+                doRedrawTimer = setTimeout( function() { scribbler.draw(); this.doRedrawTimer = null; }, 200 );
+            },
+
+            draw: function()
+            {
+                var $image = $("#image-container-src");
+                var w = this.canvas.width  = $image.width();
+                var h = this.canvas.height = $image.height();
+                var c = this.context;
+
+                if( !this.currentScribbles )
+                    return;
+                    
+                // setting canvas w/h also erases it, so no need to do it explicitly
+                for( var i=0; i<this.currentScribbles.length; i++ )
+                {
+                    var s = this.currentScribbles[i];
+                    if( s.type === "marker" )
+                    {
+                        c.beginPath();
+                        c.strokeStyle = s.style;
+                        c.lineWidth = 4;
+                        c.arc( s.location.x * w, s.location.y * h, 0.03 * w, 0,2 * Math.PI);           
+                        c.stroke();
+                    }
+                    else if( s.type === "line" )
+                    {                       
+                        c.beginPath();
+                        c.moveTo( s.points[0].x * w, s.points[0].y * h );
+                        for( var p=1; p<s.points.length; p++ )
+                        {
+                            c.lineTo( s.points[p].x * w, s.points[p].y * h );
+                        }
+                        c.lineWidth = s.width;
+                        c.strokeStyle = s.style;
+                        c.stroke();
+                    }
+                }
             }
-            else
+        } // scribbler
+        
+        
+        
+        
+        // -----------------------------------------------------------------------------------------
+        var calculator = {
+            
+            initialize: function()
             {
-                settings = $.parseJSON( settings );
-            } 
+                var unitsRE = "(miles per hour|mph|mi/h|kilometers per hour|km/?h|mps|m/s|meters per second|miles?|mi|nautical miles?|nm|kilometers?|km|inch|inches|in|foot|feet|ft|meters?|m|centimeters?|cm|knots?|kn|°?c|degrees c|degrees celsius|°?f|degrees f|degrees fahrenheit)";
+
+                this.src2dstRE = new RegExp( "^([\\d\\.]+) ?" + unitsRE + "( (in|as|to) ?" + unitsRE + ")?" );
+                
+                this.units = 
+                {
+                    mi: { type: "length", unit: "mi", scale: 1609.34, displayUnit: "miles", displayPrecision: 0, dst: ["nm","km"] },
+                    km: { type: "length", unit: "km", scale: 1000, displayUnit: "kilometers", displayPrecision: 0, dst: ["mi","nm"] },
+                    ft: { type: "length", unit: "ft", scale: 0.3048, displayUnit: "feet", displayPrecision: 0, dst: ["m"] },
+                    m : { type: "length", unit: "m", scale: 1, displayUnit: "meters", displayPrecision: 0, dst: ["ft"] },
+                    cm: { type: "length", unit: "cm", scale: 0.01, displayUnit: "centimeters", displayPrecision: 0, dst: ["in"] },
+                    in: { type: "length", unit: "in", scale: 0.0254, displayUnit: "inches", displayPrecision: 0, dst: ["cm"] },
+                    nm: { type: "length", unit: "nm", scale: 1852, displayUnit: "nautical miles", displayPrecision: 0, dst: ["mi","km"] },
+                    
+                    kn:  { type: "speed", unit: "kn", scale: 1.852, displayUnit: "knots", displayPrecision: 0, dst: ["mph","kmh"] },
+                    kmh: { type: "speed", unit: "kmh", scale: 1, displayUnit: "kilometers per hour", displayPrecision: 0, dst: ["kn","mph"] },
+                    mph: { type: "speed", unit: "mph", scale: 1.6093, displayUnit: "miles per hour", displayPrecision: 0, dst: ["kn","kmh"] },
+                    mps: { type: "speed", unit: "mps", scale: 3.6, displayUnit: "meters per second", displayPrecision: 0, dst: ["kn","mph"] },
+                    
+                    c:  { type: "temperature", unit: "c", scale: 1, displayUnit: "degrees celsius", displayPrecision: 0, dst: ["f"] },
+                    f:  { type: "temperature", unit: "f", displayUnit: "degrees fahrenheit", displayPrecision: 0, dst: ["c"] }
+                }
+                
+                $("#spoken-calculator form").on("submit", function(event)
+                {
+                    var value = $("#spoken-calc-query").val();
+                    var result = calculator.parseCalculatorExpression( value );
+                    var $calculatorResults = $("#calculator-results");
+                    
+                    if( result )
+                    {
+                        var text = result.src.srcAmount + " " + result.src.unit.toUpperCase() + " =";
+                        for( i in result.dst )
+                            text += " " + result.dst[i].dstAmount.toFixed( result.dst[i].displayPrecision ) 
+                                  + " " + result.dst[i].unit.toUpperCase() + ",";
+                        text = text.substr( 0, text.length-1 ); // cut off trailing comma
+
+                        // display result underneath calculator input field
+                        $calculatorResults.text( text );
+
+                        // also put this into conversion ticker tape / history
+                        $("#calculator-tape").show();
+                        $("#calculator-tape UL").prepend( $("<li>" + text + "</li>"));
+
+                    
+                        // now speak the result (only the first conversion is spoken)
+                        text = result.src.srcAmount + " " + result.src.displayUnit + " equals ";
+                        text += result.dst[0].dstAmount.toFixed( result.dst[0].displayPrecision ) + " " + result.dst[0].displayUnit;
+                        
+                        checklists.speak( text );
+                    }
+                    else
+                    {
+                        var text = "Did not understand.";
+                        $calculatorResults.text( text );
+                        checklists.speak( text );
+                    }
+                    event.preventDefault();
+                });
+
+
+                // when user edits or clears (with x icon) the search field, also clear the prev result
+                var clr = function() { $("#calculator-results").text(""); };
+                $("#spoken-calc-query").on( "keydown", clr);
+                $("#spoken-calculator form").on( "click", ".ui-input-clear", clr );
+            },
+            
+            parseCalculatorExpression: function( m ) 
+            {
+                var results = this.src2dstRE.exec( m.toLowerCase() );
+                
+                if( !results )
+                    return false;
+                else
+                {
+                    var srcUnit   = this._parseUnit( results[2] );
+                    srcUnit.srcAmount = parseFloat( results[1] );
+                    var dstUnit;
+                    if( results[4] )
+                    {
+                        dstUnit = [this._parseUnit( results[5] )];
+                        
+                        if( dstUnit.type !== srcUnit.type )
+                        {
+                            // cannot convert speed to distance for example
+                            // "1800 mps to miles"
+                            // in this case, just use the default conversions
+                            // we could also return false ie tell user there was an error instead
+                            dstUnit = this._findMatchingUnits( srcUnit );
+                        }
+                    }
+                    else
+                        dstUnit = this._findMatchingUnits( srcUnit );
+                }
+                
+                // now we have to do the actual conversion
+                if( srcUnit.unit=="c" )
+                {
+                    // convert c -> f
+                    dstUnit[0].dstAmount = srcUnit.srcAmount * 9/5 + 32;
+                } 
+                else if( srcUnit.unit=="f" )
+                {
+                    // convert f to c
+                    dstUnit[0].dstAmount = (srcUnit.srcAmount - 32) * 5/9;
+                } 
+                else
+                {
+                    // convert other units, first to canonical
+                    var canonical = srcUnit.srcAmount * srcUnit.scale;
+                    
+                    // then, for each dst, canonical to dst
+                    for( i in dstUnit )
+                    {
+                        dstUnit[i].dstAmount = canonical / dstUnit[i].scale;
+                    }
+               }
+                
+                return { src: srcUnit, dst: dstUnit };
+            },
+            
+            _parseUnit: function( s )
+            {
+                switch( s )
+                {
+                    case "mi":
+                    case "miles":
+                    case "mile": return this.units["mi"]; break;
+                    
+                    case "km":
+                    case "kilometers":
+                    case "kilometer": return this.units["km"]; break;
+                
+                    case "ft":
+                    case "foot":
+                    case "feet": return this.units["ft"]; break;
+                
+                    case "m":
+                    case "meters":
+                    case "meter": return this.units["m"]; break;
+                
+                    case "cm":
+                    case "centimeters":
+                    case "centimeter": return this.units["cm"]; break;
+                
+                    case "in":
+                    case "inches":
+                    case "inch": return this.units["in"]; break;
+                
+                    case "nm":
+                    case "nautical miles":
+                    case "nautical mile": return this.units["nm"]; break;
+                
+                    case "kn":
+                    case "knots":
+                    case "knot": return this.units["kn"]; break;
+                    
+                    case "kmh":
+                    case "km/h":
+                    case "kilometers per hour": return this.units["kmh"]; break;
+                    
+                    case "mph":
+                    case "mi/h":
+                    case "miles per hour": return this.units["mph"]; break;
+                    
+                    case "mps":
+                    case "m/s":
+                    case "meters per second": return this.units["mps"]; break;
+                    
+                    case "°c":
+                    case "c":
+                    case "degrees c":
+                    case "degrees celsius":
+                    case "celsius": return this.units["c"]; break;
+                    
+                    case "°f":
+                    case "f":
+                    case "degrees f":
+                    case "degrees fahrenheit":
+                    case "fahrenheit": return this.units["f"]; break;
+                
+                    default: 
+                        console.error( "Programming error: unit '" + s + "' not recognized" );
+                        return { type: "unknown", unit: "unknown" };
+                }
+            },
+            
+            _findMatchingUnits: function( srcUnit )
+            {
+                var dstUnits = [];
+                for( i in srcUnit.dst )
+                    dstUnits.push( this.units[srcUnit.dst[i]] );
+                return dstUnits;
+            }
+        };  // calculator
+        
+        
+        /*
+        console.log( calculator.parseCalculatorExpression( "12.2 mi in km" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 mi in in" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 nautical miles as kilometers" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 c" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 f as c" ) );
+        console.log( calculator.parseCalculatorExpression( "32 degrees f in celsius" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 degrees c as f" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 knots" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 feet in meters" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 kn in kmh" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 km/h in miles per hour" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 mps" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 m/s in kn" ) );
+        console.log( calculator.parseCalculatorExpression( "12.2 mi/h" ) );
+        console.log( calculator.parseCalculatorExpression( "0 degrees celsius" ) );
+        */
+        
+        // -----------------------------------------------------------------------------------------
+        var settings = {
+            settings: null,
+            _key: "settings",
+            
+            restoreSettings: function()
+            {
+                this.settings = localStorage.getItem( this._key );
+                if( !this.settings )
+                {
+                    this.settings = { "speakChecklists": true };
+                    this.persistSettings();
+                }
+                else
+                {
+                    this.settings = $.parseJSON( this.settings );
+                } 
+            },
+
+            persistSettings: function()
+            {
+                localStorage.setItem( this._key, JSON.stringify( this.settings ) );
+            },
+        
+            prepareSettingsPage: function()
+            {
+                var $switch = $("#speak-checklists");
+                var canDoSpeech = checklists.canDoSpeech();
+                $switch.slider( canDoSpeech ? "enable" : "disable" );
+                $switch.val( (this.speakChecklists() && canDoSpeech) ? "on" : "off" );
+                $switch.slider( "refresh" );
+            },
+            
+            speakChecklists: function( onOff )
+            {
+                if( onOff!==undefined )
+                {
+                    this.settings.speakChecklists = (onOff==true);
+                    this.persistSettings();
+                }
+                return this.settings.speakChecklists;
+            }
+        } // settings
+        
+        
+        
+        
+        // -----------------------------------------------------------------------------------------
+        var checklists = {
+        
+            canDoSpeech: function() {
+                return 'SpeechSynthesisUtterance' in window;
+            },
+            
+            speak: function( msg )
+            {
+                if( !this.canDoSpeech() || !settings.speakChecklists() )
+                    return;
+            
+                if( speechSynthesis.speaking )
+                    speechSynthesis.cancel();
+            
+                // modify the string a bit. Change all uppercase words/abbreviations 
+                // "APU" -> "A.P.U." and "SU25T" -> "S.U.25T."
+                // since not all (esp Apple) speech synthesizers pronounce those correctly
+                var re = /[A-Z0-9\-]{2,}/gm; 
+                var msg2 = msg.replace( re, function(s) {
+                    if( s==="HUD" ) return s; // leave HUD unchanged (just my preference...)
+                    return s.replace( /([A-Z])/gm, "$1." );
+                } );
+            
+                // http://www.broken-links.com/2013/09/20/web-speech-api-part-one-speech-synthesis/
+                // https://dvcs.w3.org/hg/speech-api/raw-file/tip/speechapi.html#tts-section
+                var foo = new SpeechSynthesisUtterance(msg2);
+                foo.rate = 0.5;
+                /*
+                foo.text = msg;
+                foo.lang = 'en-US';
+                foo.pitch = 2.0;
+                foo.volume = 0.5;
+                */
+                speechSynthesis.speak(foo);
+            },
+
+            speakNextChecklistItem: function()
+            {
+                // assumes we are on a checklist page at the moment
+                var checklist = getActivePage();
+                var checklistName = checklist.find( "DIV[data-role=header]>H1" ).text();
+                var firstItem = checklist.find( "ul.checklist>li:first" );
+                var nextItemToCheck = checklist.find( "ul.checklist>li:not(.checklist-item-checked):first" );
+            
+                if( nextItemToCheck.length===0 )
+                {
+                    // we are at the end of a checklist (nothing more to check)
+                    this.speak( "Checklist completed." );
+                }
+                else 
+                {
+                    var titleToSpeak = nextItemToCheck.find( "h1" ).text();
+                    if( firstItem[0]===nextItemToCheck[0] )
+                    {
+                        // first item is same as next item to be spoken, ie beginning of list
+                        this.speak( "Starting checklist for " + checklistName );
+                    }
+                    this.speak( titleToSpeak );
+                }
+            }
+        } // checklists
+        
+
+
+
+        // -----------------------------------------------------------------------------------------
+        var notes = {
+            editingNotesForPage: null,
+            key: "notes_",
+            
+            persistNotes: function( pageID, note )
+            {
+                localStorage.setItem( this.key + pageID, note );
+            },
+            
+            restoreNotes: function( pageID )
+            {
+                return localStorage.getItem( this.key + pageID ) || "";
+            },
+            
+            removeNotes: function( pageID )
+            {
+                localStorage.removeItem( this.key + pageID );
+            },
+
+            prepareViewAllNotesPage: function()
+            {
+                // create a new list
+                var html = "";
+                for (var i = 0; i < localStorage.length; i++)
+                {
+                    var key = localStorage.key(i);
+                    if( key.indexOf( this.key )===0 ) 
+                    {
+                        var item = localStorage.getItem(key);
+                        var pageID = key.substr( this.key.length );
+                        var pageName = pageNameOf( pageID );
+                        html += '<li><a href="#edit-note" for-pageID="' + pageID + '" data-transition="slideup">' + pageName + "</a></li>";
+                    }
+                }
+                // find & empty the all-notes list contents
+                // mark up the list
+                $("#all-notes")
+                    .empty()
+                    .append( html )
+                    .listview( "refresh" );
+            }
         }
-        function persistSettings()
-        {
-            localStorage.setItem( "settings", JSON.stringify( settings ) );
-        }
-        restoreSettings();
 
 
         
-        var canDoSpeech = 'SpeechSynthesisUtterance' in window;
-        function speak( msg )
-        {
-            if( !canDoSpeech || !settings.speakChecklists )
-                return;
+        // -----------------------------------------------------------------------------------------
+        // helper functions for Favorites handling
+        var favorites = {
+            nl: "\n", // shorthand const 
+            key: "favorites",
             
-            if( speechSynthesis.speaking )
-                speechSynthesis.cancel();
-            
-            // modify the string a bit. Change all uppercase words/abbreviations 
-            // "APU" -> "A.P.U." and "SU25T" -> "S.U.25T."
-            // since not all (esp Apple) speech synthesizers pronounce those correctly
-            var re = /[A-Z0-9\-]{2,}/gm; 
-            var msg2 = msg.replace( re, function(s) {
-                if( s==="HUD" ) return s; // leave HUD unchanged (just my preference...)
-                return s.replace( /([A-Z])/gm, "$1." );
-            } );
-            
-            // http://www.broken-links.com/2013/09/20/web-speech-api-part-one-speech-synthesis/
-            // https://dvcs.w3.org/hg/speech-api/raw-file/tip/speechapi.html#tts-section
-            var foo = new SpeechSynthesisUtterance(msg2);
-            foo.rate = 0.5;
-            /*
-            foo.text = msg;
-            foo.lang = 'en-US';
-            foo.pitch = 2.0;
-            foo.volume = 0.5;
-            */
-            speechSynthesis.speak(foo);
-        }
+            _localStorageGetFavorites: function()
+            {
+                return localStorage.getItem( this.key ) || "";
+            },
         
+            persistFavorite: function( pageID )
+            {
+                var favString = this._localStorageGetFavorites();
+                // only add if not in favs already
+                if( favString.indexOf( pageID + this.nl )===-1 )
+                {
+                    favString += pageID + this.nl;
+                    localStorage.setItem( this.key, favString );
+                }
+            },
+        
+            removeFavorite: function( pageID )
+            {
+                var favString = this._localStorageGetFavorites();
+                favString = favString.replace( pageID + this.nl, "" );
+                localStorage.setItem( this.key, favString );
+            },
+        
+            isFavorite: function( pageID )
+            {
+                var favString = this._localStorageGetFavorites();
+                return favString.indexOf( pageID + this.nl )!==-1;
+            },
+        
+            prepareViewAllFavsPage: function()
+            {
+                // create a new list
+                var favString = this._localStorageGetFavorites();
+                var favs = favString.split( this.nl );
+                favs.pop(); // remove last empty (because final nl char) element
+                var html = "";
+                for (var i = 0; i < favs.length; i++)
+                {
+                    var pageID = favs[i];
+                    var pageName = pageNameOf( pageID );
+                    html += '<li><a href="#' + pageID + '">' + pageName + "</a></li>";
+                }
+                // find & empty the all-favs list contents
+                // mark up the list
+                $("#all-favs")
+                    .empty()
+                    .append( html )
+                    .listview( "refresh" );
+            }
+        } // favorites object
+        
+        
+
+
+        // -----------------------------------------------------------------------------------------
+
         function pageNameOf( pageID )
         {
             return $( "#" + pageID + " div[data-role=header] h1").text();
         }
-        
-        function prepareViewAllNotesPage()
-        {
-            // create a new list
-            var html = "";
-            for (var i = 0; i < localStorage.length; i++)
-            {
-                var key = localStorage.key(i);
-                if( key.indexOf( "notes_" )===0 ) 
-                {
-                    var item = localStorage.getItem(key);
-                    var pageID = key.substr( "notes_".length );
-                    var pageName = pageNameOf( pageID );
-                    html += '<li><a href="#edit-note" for-pageID="' + pageID + '" data-transition="slideup">' + pageName + "</a></li>";
-                }
-            }
-            // find & empty the all-notes list contents
-            // mark up the list
-            $("#all-notes")
-                .empty()
-                .append( html )
-                .listview( "refresh" );
-        }
 
-
-        function speakNextChecklistItem()
-        {
-            // assumes we are on a checklist page at the moment
-            var checklist = getActivePage();
-            var checklistName = checklist.find( "DIV[data-role=header]>H1" ).text();
-            var firstItem = checklist.find( "ul.checklist>li:first" );
-            var nextItemToCheck = checklist.find( "ul.checklist>li:not(.checklist-item-checked):first" );
-            
-            if( nextItemToCheck.length===0 )
-            {
-                // we are at the end of a checklist (nothing more to check)
-                speak( "Checklist completed." );
-            }
-            else 
-            {
-                var titleToSpeak = nextItemToCheck.find( "h1" ).text();
-                if( firstItem[0]===nextItemToCheck[0] )
-                {
-                    // first item is same as next item to be spoken, ie beginning of list
-                    speak( "Starting checklist for " + checklistName );
-                }
-                speak( titleToSpeak );
-            }
-        }
-        
         function getActivePage()
         {
             // jeez what are they thinking. Could we make this more complicated...
@@ -163,70 +782,7 @@
                 $this.removeAttr( "src2" );
             });
         }
-        
-        // helper functions for Favorites handling
-        
-        var nl = "\n"; // shorthand const
-        var favoritesKey = "favorites";
-        function localStorageGetFavorites()
-        {
-            return localStorage.getItem( favoritesKey ) || "";
-        }
-        
-        function addFavorite( pageID )
-        {
-            var favString = localStorageGetFavorites();
-            // only add if not in favs already
-            if( favString.indexOf( pageID + nl )===-1 )
-            {
-                favString += pageID + nl;
-                localStorage.setItem( favoritesKey, favString );
-            }
-        }
-        
-        function removeFavorite( pageID )
-        {
-            var favString = localStorageGetFavorites();
-            favString = favString.replace( pageID + nl, "" );
-            localStorage.setItem( favoritesKey, favString );
-        }
-        
-        function isFavorite( pageID )
-        {
-            var favString = localStorageGetFavorites();
-            return favString.indexOf( pageID + nl )!==-1;
-        }
-        
-        function prepareViewAllFavsPage()
-        {
-            // create a new list
-            var favString = localStorageGetFavorites();
-            var favs = favString.split( nl );
-            favs.pop(); // remove last empty (because final nl char) element
-            var html = "";
-            for (var i = 0; i < favs.length; i++)
-            {
-                var pageID = favs[i];
-                var pageName = pageNameOf( pageID );
-                html += '<li><a href="#' + pageID + '">' + pageName + "</a></li>";
-            }
-            // find & empty the all-favs list contents
-            // mark up the list
-            $("#all-favs")
-                .empty()
-                .append( html )
-                .listview( "refresh" );
-        }
-        
-        
-        
-        function prepareSettingsPage()
-        {
-            var $switch = $("#speak-checklists");
-            $switch.slider( canDoSpeech ? "enable" : "disable" );
-            $switch.val( (settings.speakChecklists && canDoSpeech) ? "on" : "off" );
-            $switch.slider( "refresh" );
-        }
+                
         
         function switchToHomePage( event )
         {
@@ -237,10 +793,29 @@
             });
         }
         
+        function handleResize( event )
+        {
+            // most pages do not care about resize events or orientation changes
+            // image container pages (which may have a canvas with drawings on them do)
+            var pageID = getActivePage().attr('id');
+
+            if( pageID === "image-container" )
+            {
+                scribbler.resize();
+                return;
+            }
+        }
+        
+        // -----------------------------------------------------------------------------------------
         
         $( document ).ready( function()
         {
-            $body = $("BODY");
+            $document = $(document);
+            
+            settings.restoreSettings();
+            scribbler.initialize();
+            calculator.initialize();
+
             
             $("A.dont-bubble").on( "tap", function( event ) {
                 event.stopPropagation();
@@ -248,11 +823,12 @@
             
             // handle clicks on checklist list items 
             // ie toggle the checkbox and background color
-            $body.on( "tap", "UL.checklist>LI", function(event) {
+            $document.on( "tap", "UL.checklist>LI", function(event) {
                 var $this = $(this);
                 var $parent = $this.parent();
                 var $nextUncheckedItem = $parent.find( "LI:not(.checklist-item-checked):first" );
                 var $lastCheckedItem = $parent.find( "LI.checklist-item-checked:last" );
+                var $body = $("body");
                 
                 // allow toggling only If
                 // - toggling the currently checked one to OFF
@@ -261,24 +837,24 @@
                 ||  ($nextUncheckedItem.length>0 && $this[0]===$nextUncheckedItem[0]) )
                 {
                     $this.toggleClass( "checklist-item-checked" );
-                    speakNextChecklistItem();
+                    checklists.speakNextChecklistItem();
                     // refind first unchecked item, so we can scroll it 
                     // to top of view
                     $nextUncheckedItem = $parent.find( "LI:not(.checklist-item-checked):first" );
                     if( $nextUncheckedItem.length===1 )
-                        $body.animate( {scrollTop: $nextUncheckedItem.position().top }, 
+                        $body.animate( {scrollTop: $nextUncheckedItem.position().top+"px" }, 
                                         600, "swing" );
                 }
                 else
                 {
-                    speak( "Please complete previous steps first." );
+                    checklists.speak( "Please complete previous steps first." );
                     event.preventDefault();
                     event.stopPropagation();
                 }
             });
             
             // for checklist footers, handle the "reset" button
-            $body.on( "tap", "A.checklist-reset", function() {
+            $document.on( "tap", "A.checklist-reset", function() {
                 var $li = $(this);
                 var $page = $li.parents("DIV[data-role=page]");
                 $page.find( "LI.checklist-item-checked" ).removeClass( "checklist-item-checked" );
@@ -287,7 +863,7 @@
                 $.mobile.silentScroll(0);
                 event.preventDefault();
                 event.stopPropagation();
-                speakNextChecklistItem();
+                checklists.speakNextChecklistItem();
             });
             
             
@@ -297,7 +873,7 @@
             // also prevents bookmarking in the browser and Favs :( 
             // May revisit / automatically generate source for the airfield map containers
             // eventually...
-            $body.on( "tap", "A[HREF=#image-container]", function(event) {
+            $document.on( "tap", "A[HREF=#image-container]", function(event) {
                 var url = $(this).attr( "data-img-src" );
                 // we might modify the url here if we are on safari and on iOS
                 // in order to force using the Google native map app rather than
@@ -310,24 +886,23 @@
             });
             
             
-            $body.on( "tap", "A[for-pageID]", function() {
+            $document.on( "tap", "A[for-pageID]", function() {
                 // special click handler for view-all-notes page list items/A's
                 // pass the pageID of the page for which we will be editing the
                 // note to the pagecontainerbeforetransition handler via this
                 // global
-                editingNotesForPage = $(this).attr("for-pageID");
+                notes.editingNotesForPage = $(this).attr("for-pageID");
             });
             
             
             $("#speak-checklists").on( "change", function( event ) {
-                settings.speakChecklists = $(this).val() === "on";
-                persistSettings();
+                settings.speakChecklists( $(this).val() === "on" );
             });
             
             $("#delete-note").on( "tap", function() {
                 if( confirm( "Really delete these notes ?" ) )
                 {
-                    localStorage.removeItem( editingNotesForPage );
+                    notes.removeNotes( notes.editingNotesForPage );
                 }
                 else
                 {
@@ -339,24 +914,21 @@
             
 
             $("#save-note").on( "tap", function(event) {
-                localStorage.setItem( editingNotesForPage, $pageNotes.val() )
+                notes.persistNotes( notes.editingNotesForPage, $pageNotes.val() )
             });
             
             
             $pageNotes = $("#page-notes"); // just a static to avoid looking up every time
-            $body.on( "pagecontainerbeforetransition", function( event, ui ) {
-                
+            $document.on( "pagecontainerbeforetransition", function( event, ui ) {
                 var toPageID = ui.toPage.attr('id');
-
-                $meta.attr( "content", "width=device-width, initial-scale=1.0, maximum-scale=10.0, user-scalable=yes" )
         
                 lazyLoadImages( toPageID ); // convert any <img src2=...> to src
 
                 switch( toPageID )
                 {
-                    case "view-all-notes": return prepareViewAllNotesPage();
-                    case "view-all-favs":  return prepareViewAllFavsPage();
-                    case "settings":       return prepareSettingsPage();
+                    case "view-all-notes": return notes.prepareViewAllNotesPage();
+                    case "view-all-favs":  return favorites.prepareViewAllFavsPage();
+                    case "settings":       return settings.prepareSettingsPage();
                     case "image-container": if(!ui.options.fromPage) 
                                                 return switchToHomePage( event );
                 }
@@ -377,49 +949,54 @@
                     // if we are going to the edit page, get the notes for the source page
                     var fromPageID = ui.options.fromPage.attr('id')
                     if( fromPageID !== "view-all-notes" )
-                        editingNotesForPage = fromPageID;
+                        notes.editingNotesForPage = fromPageID;
                         
-                    $("#edit-note-for-page").text( pageNameOf( editingNotesForPage ) );
+                    $("#edit-note-for-page").text( pageNameOf( notes.editingNotesForPage ) );
                     
                     // else we are coming from view-all-notes page and
                     // the link click event handler has already set up
-                    // the editingNotesForPage global.
+                    // the notes.editingNotesForPage global.
                 }
                 else
                     // if we are just page transitioning, get the notes for the dest page
-                    editingNotesForPage = toPageID;
+                    notes.editingNotesForPage = toPageID;
                     
-                editingNotesForPage = "notes_" + editingNotesForPage;
-                var notes = localStorage.getItem( editingNotesForPage ) || "";
+                var pageNotes = notes.restoreNotes( notes.editingNotesForPage );
 
                 if( aboutToEdit )
                 {
                     // set the value of the notes editing dialog to the prev stored note
-                    $pageNotes.val( notes );
+                    $pageNotes.val( pageNotes );
                     // dont bother showing delete note button if note is empty anyway
-                    $("#delete-note").toggle( notes !== "" );
+                    $("#delete-note").toggle( pageNotes !== "" );
                 }
                 else
                 {
                     // not editing, just a regular page transition
                     // make sure to highlight the Notes button if the toPage already
                     // has a note stored for it
-                    $("#"+toPageID+ " a[href=#edit-note]").toggleClass("ui-btn-active",notes!=="");
+                    $("#"+toPageID+ " a[href=#edit-note]").toggleClass("ui-btn-active",pageNotes!=="");
                 }
 
                 $("#"+toPageID+ " a[href=#favs]").toggleClass("ui-btn-active",
-                    isFavorite(toPageID));
+                    favorites.isFavorite(toPageID));
             });
             
             
-            // this is equivalent to "on page open"
-            $body.on( "pageshow", function( event, ui ) {
-                var page = getActivePage();
+            // this is equivalent to "on page open", called after transition has completed
+            $document.on( "pageshow", function( event, ui ) {
+                var $page = getActivePage();
                 
-                if( page.find( "ul.checklist" ).length===1 )
+                if( $page.attr( "id" ) === "image-container" )
+                {
+                    scribbler.pageShow();
+                    return;
+                }
+                
+                if( $page.find( "ul.checklist" ).length===1 )
                 {
                     // we are on a checklist page
-                    speakNextChecklistItem();
+                    checklists.speakNextChecklistItem();
                 }
                                 
                 // speech input enable all search fields
@@ -439,16 +1016,16 @@
 
             
             // handle Favs button in footer press
-            $body.on( "tap", "A[href=#favs]", function( event ) {
+            $document.on( "tap", "A[href=#favs]", function( event ) {
                 var pageID = getActivePage().attr('id');
-                if( isFavorite( pageID ) )
+                if( favorites.isFavorite( pageID ) )
                 {
-                    removeFavorite( pageID );
+                    favorites.removeFavorite( pageID );
                     $(this).removeClass("ui-btn-active");
                 }
                 else
                 {
-                    addFavorite( pageID );
+                    favorites.persistFavorite( pageID );
                     $(this).addClass("ui-btn-active");
                 }
                 // dont actually traverse the link
@@ -456,15 +1033,31 @@
                 event.preventDefault();
             });
             
-            // this is a cheesy way to allow scaling of the image on desktops
-            // which does not affect tablets, phones (since no mousewheel)
-            // However no scroll bars, weird interaction w vertical scrolling
-            // need something better here...
-            $("#image-container-src").on( "wheel", function( event ) {
-                $this = $(this);
-                var max = (parseInt($this.css("max-width")) + event.originalEvent.wheelDelta/120) + "%";
-                $this.css( "max-width", max ).css( "max-height", max );
+            
+            $("A[manual]").on("tap", function(event) {
+                var $this = $(this);
+                var pageNr = parseInt( $this.attr("page") );
+                var manual = $this.attr("manual");
+                
+                // on desktop chrome or Firefox browsers, which support http://..../bla.pdf#page=27 follow that link
+                // for other browsers, do an interstitial alert to show page # then open the pdf file 
+                // and let the user manually scroll to that page.
+                var userAgent = navigator.userAgent;
+                var pdfPagingCapable = (userAgent.indexOf( "Chrome" )>0 || userAgent.indexOf( "Firefox" )>0)
+                                    && (userAgent.indexOf( "Mobile" )===-1);
+                var manualURL;
+                switch( manual )
+                {
+                    case "A10C": manualURL = "DCS%20A10C_Flight_Manual.pdf"; break;
+                }
+                if( window.confirm("Open DCS " + manual + " manual to page " + pageNr) )
+                {
+                    window.open( manualURL + "#page=" + pageNr, "Manual" ).focus();
+                }
             });
+            
+            window.addEventListener('resize', handleResize, false);
+            window.addEventListener('orientationchange', handleResize, false);
         });
     </script>
     
@@ -542,11 +1135,13 @@
             text-shadow: none;
             border-radius: 15px;
         }
-        .ui-btn {
+        /*
+        .ui-btn :not(.ui-btn-icon-notext) {
             /* override the jquery default of 16px 
              so things are easier to hit "while flying" */
             font-size: 1.25em;
         }
+        */
         .ui-listview>li h1 {
             font-size: 1.25em;
         }
@@ -567,6 +1162,12 @@
             float: right;
             margin-right: 3em;
         }
+        ul.checklist {
+            /* add some white space to bottom of checklists to allow
+            content to scroll up, so user can check off last few items
+            from same top-of-screen position as the first ones */
+            margin-bottom: 1000px;
+        }
         div.image-map {
             width:100%; position:relative; margin-bottom:200px;
         }
@@ -578,6 +1179,21 @@
         }
         A.image-map-link {
             display:block; position:absolute; 
+        }
+        #glossary .ui-listview>li p {
+            white-space: normal;
+        }
+        div.scribbler-color-swatch {
+            width: 50px;
+            height: 50px;
+        }
+        .ui-footer-fixed {
+            padding-left: 5px; /* was 15px why ? 5 matches the header left hand button & gives us more footer space */
+        }
+        A[class*=scribbler-] {
+            height: 16px;
+            padding-left: 20px;
+            width: 20px;
         }
     </style>
 </head>
@@ -596,7 +1212,7 @@
                 <li><a href="#enemies">Weapons &amp; Threats</a></li>
                 <li><a href="#reference">Reference</a></li>
                 <li><a href="#glossary">Glossary</a></li>
-                <li><a href="#calculators">Calculators</a></li>
+                <li><a href="#spoken-calculator">Calculator</a></li>
             </ul>
             <p><br><br>Personal:</p><br>
             <ul data-role="listview">
@@ -623,7 +1239,7 @@
                 <li><a href="#NYA"><img src2="images/dcs/A10C.png" />A-10C Warthog</a></li>
                 <li><a href="#NYA"><img src2="images/dcs/Mi8.png" />Mi8 MTV2</a></li>
                 <li><a href="#NYA"><img src2="images/dcs/UH50.png" />UH-1H Huey</a></li>
-                <li><a href="#NYA"><img src2="images/dcs/BlackShark.png" />Black Shark 2</a></li>
+                <li><a href="#NYA"><img src2="images/dcs/BlackShark.png" />Ka-50 Black Shark 2</a></li>
                 <li><a href="#combined-arms"><img src2="images/dcs/CA.png" />Combined Arms</a></li>
                 <li><a href="#NYA"><img src2="images/dcs/F15C.png" />F-15C Eagle<p>DCS Flaming Cliffs 3</p></a></li>
                 <li><a href="#NYA"><img src2="images/dcs/A10C.png" /><h2>A-10A Thunderbolt II</h2><p>DCS Flaming Cliffs 3</p></a></li>
@@ -866,7 +1482,7 @@
                 </li>
 
                 <li><a href="#airfields-Anapa">
-                    <div class="airfield-name">Anapa<span class="airfield-FKey">F1</span></div>
+                    <div class="airfield-name">Anapa<span class="airfield-FKey">ID 1</span></div>
                     <span class="airfield-callsign">URKA</span>
                     <p class="airfield-frequencies">Tower: 121 Mhz
 
@@ -876,7 +1492,7 @@
                 </li>
                 
                 <li><a href="#airfields-Batumi">
-                    <div class="airfield-name">Batumi<span class="airfield-FKey">F2</span></div>
+                    <div class="airfield-name">Batumi<span class="airfield-FKey">ID 11</span></div>
                     <span class="airfield-callsign">UGSB</span>
                     <p class="airfield-frequencies">Tower: 131 Mhz
 ILS:   13 110.3 Mhz
@@ -885,7 +1501,7 @@ TACAN: 16X BTM</p>
                 </li>
 
                 <li><a href="#airfields-Beslan">
-                    <div class="airfield-name">Beslan<span class="airfield-FKey">F3</span></div>
+                    <div class="airfield-name">Beslan<span class="airfield-FKey">ID 21</span></div>
                     <span class="airfield-callsign">URMO</span>
                     <p class="airfield-frequencies">Tower: 141 Mhz
 
@@ -894,7 +1510,7 @@ TACAN: 16X BTM</p>
                 </li>
                 
                 <li><a href="#airfields-Gelendzhik">
-                    <div class="airfield-name">Gelendzhik<span class="airfield-FKey">F4</span></div>
+                    <div class="airfield-name">Gelendzhik<span class="airfield-FKey">ID 6</span></div>
                     <span class="airfield-callsign">URKG</span>
                     <p class="airfield-frequencies">Tower: 126 Mhz
                     
@@ -903,7 +1519,7 @@ TACAN: 16X BTM</p>
                 </li>
                 
                 <li><a href="#airfields-Gudauta">
-                    <div class="airfield-name">Gudauta</div>
+                    <div class="airfield-name">Gudauta<span class="airfield-FKey">ID 10</span></div>
                     <span class="airfield-callsign">UG23</span>
                     <p class="airfield-frequencies">Tower: 130 Mhz
                     
@@ -912,7 +1528,7 @@ TACAN: 16X BTM</p>
                 </li>
 
                 <li><a href="#airfields-Kobuleti">
-                    <div class="airfield-name">Kobuleti</div>
+                    <div class="airfield-name">Kobuleti<span class="airfield-FKey">ID 13</span></div>
                     <span class="airfield-callsign">UG5X</span>
                     <p class="airfield-frequencies">Tower: 133 Mhz
 ILS:   07 111.5 Mhz
@@ -921,7 +1537,7 @@ TACAN: 67X KBL</p>
                 </li>
 
                 <li><a href="#airfields-Kutaisi">
-                    <div class="airfield-name">Kutaisi</div>
+                    <div class="airfield-name">Kutaisi<span class="airfield-FKey">ID 14</span></div>
                     <span class="airfield-callsign">UGKO</span>
                     <p class="airfield-frequencies">Tower: 134 Mhz
 ILS:   07 109.75 Mhz
@@ -930,7 +1546,7 @@ TACAN: 44X KTS</p>
                 </li>
 
                 <li><a href="#airfields-Krasnodar1">
-                    <div class="airfield-name">Krasnodar Center</div>
+                    <div class="airfield-name">Krasnodar Center<span class="airfield-FKey">ID 2</span></div>
                     <span class="airfield-callsign">URKL</span>
                     <p class="airfield-frequencies">Tower: 122 Mhz
                     
@@ -939,7 +1555,7 @@ TACAN: 44X KTS</p>
                 </li>
 
                 <li><a href="#airfields-Krasnodar2">
-                    <div class="airfield-name">Krasnodar Pashkovksy</div>
+                    <div class="airfield-name">Krasnodar Pashkovksy<span class="airfield-FKey">ID 8</span></div>
                     <span class="airfield-callsign">URKK</span>
                     <p class="airfield-frequencies">Tower: 128 Mhz
                     
@@ -948,7 +1564,7 @@ TACAN: 44X KTS</p>
                 </li>
 
                 <li><a href="#airfields-Krymsk">
-                    <div class="airfield-name">Krymsk</div>
+                    <div class="airfield-name">Krymsk<span class="airfield-FKey">ID 4</span></div>
                     <span class="airfield-callsign">URKW</span>
                     <p class="airfield-frequencies">Tower: 124 Mhz
                     
@@ -957,7 +1573,7 @@ TACAN: 44X KTS</p>
                 </li>
 
                 <li><a href="#airfields-Maykop">
-                    <div class="airfield-name">Maykop Khanskaya</div>
+                    <div class="airfield-name">Maykop Khanskaya<span class="airfield-FKey">ID 5</span></div>
                     <span class="airfield-callsign">URKH</span>
                     <p class="airfield-frequencies">Tower: 125 Mhz
                     
@@ -966,7 +1582,7 @@ TACAN: 44X KTS</p>
                 </li>
 
                 <li><a href="#airfields-Mineralnye">
-                    <div class="airfield-name">Mineralnye Vody</div>
+                    <div class="airfield-name">Minvody<span class="airfield-FKey">ID 15</span></div>
                     <span class="airfield-callsign">URMM</span>
                     <p class="airfield-frequencies">Tower: 135 Mhz
 ILS:   11 111.7 Mhz
@@ -975,7 +1591,7 @@ ILS:   11 111.7 Mhz
                 </li>
 
                 <li><a href="#airfields-Mozdok">
-                    <div class="airfield-name">Mozdok</div>
+                    <div class="airfield-name">Mozdok<span class="airfield-FKey">ID 17</span></div>
                     <span class="airfield-callsign">XRMF</span>
                     <p class="airfield-frequencies">Tower: 137 Mhz
                     
@@ -984,7 +1600,7 @@ ILS:   11 111.7 Mhz
                 </li>
 
                 <li><a href="#airfields-Nalchik">
-                    <div class="airfield-name">Nalchik</div>
+                    <div class="airfield-name">Nalchik<span class="airfield-FKey">ID 16</span></div>
                     <span class="airfield-callsign">URMN</span>
                     <p class="airfield-frequencies">Tower: 136 Mhz
 ILS:   23 110.5 Mhz
@@ -993,7 +1609,7 @@ ILS:   23 110.5 Mhz
                 </li>
 
                 <li><a href="#airfields-Novorossiysk">
-                    <div class="airfield-name">Novorossiysk</div>
+                    <div class="airfield-name">Novorossiysk<span class="airfield-FKey">ID 3</span></div>
                     <span class="airfield-callsign">URKN</span>
                     <p class="airfield-frequencies">Tower: 123 Mhz
                     
@@ -1002,7 +1618,7 @@ ILS:   23 110.5 Mhz
                 </li>
 
                 <li><a href="#airfields-Senaki">
-                    <div class="airfield-name">Senaki</div>
+                    <div class="airfield-name">Senaki Kholki<span class="airfield-FKey">ID 12</span></div>
                     <span class="airfield-callsign">UGKS</span>
                     <p class="airfield-frequencies">Tower: 132 Mhz
 ILS:   09 108.9 Mhz
@@ -1011,7 +1627,7 @@ TACAN: 31X TSK</p>
                 </li>
 
                 <li><a href="#airfields-Sochi">
-                    <div class="airfield-name">Sochi Adler</div>
+                    <div class="airfield-name">Sochi Adler<span class="airfield-FKey">ID 7</span></div>
                     <span class="airfield-callsign">URSS</span>
                     <p class="airfield-frequencies">Tower: 127 Mhz
 ILS:   06 111.1 Mhz
@@ -1020,7 +1636,7 @@ ILS:   06 111.1 Mhz
                 </li>
 
                 <li><a href="#airfields-Soganlug">
-                    <div class="airfield-name">Tbilisi Soganlug</div>
+                    <div class="airfield-name">Tbilisi Soganlug<span class="airfield-FKey">ID 19</span></div>
                     <span class="airfield-callsign">UG24</span>
                     <p class="airfield-frequencies">Tower: 139 Mhz
                     
@@ -1029,7 +1645,7 @@ ILS:   06 111.1 Mhz
                 </li>
 
                 <li><a href="#airfields-Sukhumi">
-                    <div class="airfield-name">Sukhumi Babushara</div>
+                    <div class="airfield-name">Sukhumi Babushara<span class="airfield-FKey">ID 9</span></div>
                     <span class="airfield-callsign">UGSS</span>
                     <p class="airfield-frequencies">Tower: 129 Mhz
                     
@@ -1038,7 +1654,7 @@ ILS:   06 111.1 Mhz
                 </li>
 
                 <li><a href="#airfields-Tbilisi">
-                    <div class="airfield-name">Tbilisi Lochini</div>
+                    <div class="airfield-name">Tbilisi Lochini<span class="airfield-FKey">ID 18</span></div>
                     <span class="airfield-callsign">UGTB</span>
                     <p class="airfield-frequencies">Tower: 138 Mhz
 ILS:   12R 110.3 Mhz
@@ -1047,7 +1663,7 @@ ILS:   12R 110.3 Mhz
                 </li>
 
                 <li><a href="#airfields-Vaziani">
-                    <div class="airfield-name">Vaziani</div>
+                    <div class="airfield-name">Vaziani<span class="airfield-FKey">ID 20</span></div>
                     <span class="airfield-callsign">UG27</span>
                     <p class="airfield-frequencies">Tower: 140 Mhz
 ILS:   13 108.75 Mhz
@@ -1184,6 +1800,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°55’36”N<br>41°51’05”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1236,6 +1855,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°36’58”N<br>41°35’31”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -1284,6 +1906,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>43°12’26”N<br>44°35’19”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1333,6 +1958,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>44°33’54”N<br>38°00’25”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1383,6 +2011,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>43°06’09”N<br>40°34’01”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1439,6 +2070,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°55’36”N<br>41°51’05”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -1499,6 +2133,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°37’09”N<br>45°02’10”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -1550,6 +2187,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>45°05’03”N<br>38°57’34”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1603,6 +2243,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>45°01’52”N<br>39°08’38”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1658,6 +2301,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>44°58’27”N<br>38°00’37”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1679,7 +2325,7 @@ TACAN: 22X VAS</p>
     <div data-role="page" id="airfields-Maykop">
         <div data-role="header" data-theme="a">
             <a data-rel="back">Back</a>
-            <h1>Maykop</h1>
+            <h1>Maykop Khanskaya</h1>
             <a href="index.html">Home</a>
         </div>
         <div data-role="content">
@@ -1710,6 +2356,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>44°41’22”N<br>40°03’08”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1767,6 +2416,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>44°12’58”N<br>43°06’13”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1819,6 +2471,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>43°47’26”N<br>44°34’44”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1876,6 +2531,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>43°30’29”N<br>43°37’30”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1929,6 +2587,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>44°39’36”N<br>37°46’25”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -1949,7 +2610,7 @@ TACAN: 22X VAS</p>
     <div data-role="page" id="airfields-Senaki">
         <div data-role="header" data-theme="a">
             <a data-rel="back">Back</a>
-            <h1>Senaki</h1>
+            <h1>Senaki Kholki</h1>
             <a href="index.html">Home</a>
         </div>
         <div data-role="content">
@@ -1986,6 +2647,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>42°14’31”N<br>42°02’08”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2040,6 +2704,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>43°06’17”N<br>40°35’26”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Russia</td>
                         </tr>
                     </table>
                 </li>
@@ -2089,6 +2756,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°39’26”N<br>44°55’48”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2139,6 +2809,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>42°51’21”N<br>41°09’17”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2195,6 +2868,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°40’37”N<br>44°56’37”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2251,6 +2927,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°37’09”N<br>45°02’10”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2294,6 +2973,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>42°15’54”N<br>42°39’24”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2336,6 +3018,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>42°14’53”N<br>42°37’50”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2377,6 +3062,9 @@ TACAN: 22X VAS</p>
                         </tr><tr>
                           <td>Lat/Lon</td>
                           <td>41°50’17”N<br>41°48’02”E</td>
+                        </tr><tr>
+                          <td>Country</td>
+                          <td>Georgia</td>
                         </tr>
                     </table>
                 </li>
@@ -2635,14 +3323,14 @@ TACAN: 22X VAS</p>
                     <p><i class="key">ls F</i></p>
                 </li>
                 <li>
-                    <h1>Over runway cut power, flare</h1>
+                    <h1>Over runway: cut power, flare</h1>
                     <p>cut power to idle</p>
                     <p><i class="key">B</i> speed brakes</p>
                     <p>flare</p>
                     <p>sink rate -3 m/s</p>
                 </li>
                 <li>
-                    <h1>Touchdown:deploy chute, wheel brake</h1>
+                    <h1>Touchdown: deploy chute, wheel brake</h1>
                     <p><i class="key">P</i> deploy chute</p>
                     <p><i class="key">W</i> wheel brakes as needed</p>
                 </li>
@@ -2714,14 +3402,14 @@ TACAN: 22X VAS</p>
                     <p><i class="key">ls F</i></p>
                 </li>
                 <li>
-                    <h1>Over runway cut power, flare</h1>
+                    <h1>Over runway: cut power, flare</h1>
                     <p>cut power to idle</p>
                     <p><i class="key">B</i> speed brakes</p>
                     <p>flare</p>
                     <p>sink rate -3 m/s</p>
                 </li>
                 <li>
-                    <h1>Touchdown:chute, wheel brake</h1>
+                    <h1>Touchdown: deploy chute, wheel brake</h1>
                     <p><i class="key">P</i> deploy chute</p>
                     <p><i class="key">W</i> wheel brakes as needed</p>
                 </li>
@@ -2860,7 +3548,7 @@ TACAN: 22X VAS</p>
                     <p>release Space key</p>
                 </li>
                 <li>
-                    <h1>Retrim plane</h1>
+                    <h1>Re-trim plane</h1>
                     <p>if needed on</p>
                     <p>asymmetric release</p>
                 </li>
@@ -3118,7 +3806,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>AAP</h1>
-                    <p>Auxiliary Avionics Panel</p>
+                    <p>Auxiliary Avionics Panel. Provides power to the CDU and EGI, and controls which mode the TAD displays waypoints with. <a href="#" manual="A10C" page="171">Manual</a></p>
                 </li>
                 <li>
                     <h1>AAS</h1>
@@ -3126,7 +3814,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>ACP</h1>
-                    <p>Armament Control Panel ADF Automatic Direction Finding</p>
+                    <p>Armament Control Panel</p>
                 </li>
                 <li>
                     <h1>ADF</h1>
@@ -3154,7 +3842,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>AHCP</h1>
-                    <p>Armament HUD Control Panel </p>
+                    <p>Armament HUD Control Panel <a href="#" manual="A10C" page="106">Manual</a></p>
                 </li>
                 <li>
                     <h1>AIM</h1>
@@ -3198,11 +3886,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>AOA</h1>
-                    <p>Angle of Attack</p>
+                    <p>Angle of Attack (pitch angle of plane) <a href="#" manual="A10C" page="479">Manual</a></p>
                 </li>
                 <li>
-                    <h1>AOA</h1>
-                    <p>Angle of attack (pitch angle of plane)</p>
+                    <h1>AOA Indexer</h1>
+                    <p>Angle of attack display, landing aid <a href="#" manual="A10C" page="129">Manual</a></p>
                 </li>
                 <li>
                     <h1>AP</h1>
@@ -3221,8 +3909,16 @@ TACAN: 22X VAS</p>
                     <p>Aerial Refueling</p>
                 </li>
                 <li>
+                    <h1>Arizona</h1>
+                    <p>Out of Anti-radiation missiles (cmp Bingo for fuel, Dakota A/G, Kansas A/A, Nevada Mavericks)</p>
+                </li>
+                <li>
                     <h1>ARS</h1>
                     <p>Attitude Reference Symbol ASL Azimuth Steering Line</p>
+                </li>
+                <li>
+                    <h1>as fragged</h1>
+                    <p>exactly as stated in the briefing</p>
                 </li>
                 <li>
                     <h1>ASL</h1>
@@ -3293,6 +3989,10 @@ TACAN: 22X VAS</p>
                     <p>an aircraft that is unidentified.  The aircraft must be identified by some means, visual or electronic, before action can be taken</p>
                 </li>
                 <li>
+                    <h1>BRA</h1>
+                    <p>Bearing, Range, Altitude</p>
+                </li>
+                <li>
                     <h1>Buddy spike</h1>
                     <p>Friendly aircraft(s) air-to-air indication on radar warning receiver (RWR); to be followed by position, heading, and altitude</p>
                 </li>
@@ -3326,7 +4026,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>CAS</h1>
-                    <p>Calibrated Air Speed </p>
+                    <p>Calibrated Air Speed</p>
                 </li>
                 <li>
                     <h1>CAS</h1>
@@ -3357,11 +4057,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>CCIP</h1>
-                    <p>Continuously Computed <b>Release</b> Point bomb release mode</p>
+                    <p>Continuously Computed <b>Impact</b> Point bomb release mode aka Dive Bombing, visual aim</p>
                 </li>
                 <li>
                     <h1>CCRP</h1>
-                    <p>Continuously Computed <b>Impact</b> Point bomb release mode</p>
+                    <p>Continuously Computed <b>Release</b> Point bomb release mode. Target = SPI</p>
                 </li>
                 <li>
                     <h1>CDI</h1>
@@ -3373,11 +4073,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>CDU</h1>
-                    <p>Central Distribution Unit </p>
+                    <p>Central Distribution Unit</p>
                 </li>
                 <li>
                     <h1>CDU</h1>
-                    <p>Control Display Unit</p>
+                    <p>Control Display Unit  <a href="#" manual="A10C" page="173">Manual</a></p>
                 </li>
                 <li>
                     <h1>CG</h1>
@@ -3396,6 +4096,10 @@ TACAN: 22X VAS</p>
                     <p>Central Interface Control Unit</p>
                 </li>
                 <li>
+                    <h1>clicks</h1>
+                    <p>kilometers: 5 clicks north of IP</p>
+                </li>
+                <li>
                     <h1>Cleared hot</h1>
                     <p>final message by JTAC to CAS pilot that it is ok to engage enemy</p>
                 </li>
@@ -3409,16 +4113,21 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>CMSC</h1>
-                    <p>Countermeasures Set Control</p>
+                    <p>Countermeasures Set Control <a href="#" manual="A10C" page="408">Manual</a></p>
                 </li>
                 <li>
                     <h1>CMSP</h1>
-                    <p>Countermeasure Set Panel</p>
+                    <p>Countermeasure Signal Processor Panel  <a href="#" manual="A10C" page="402">Manual</a></p>
                 </li>
                 <li>
                     <h1>CR</h1>
                     <p>Consent to Release</p>
                 </li>
+                <li>
+                    <h1>Dakota</h1>
+                    <p>Out of Anti-to-ground missiles (cmp Bingo for fuel, Arizona HARM, Kansas A/A, Nevada Mavericks)</p>
+                </li>
+
                 <li>
                     <h1>Danger close</h1>
                     <p>message by JTAC to CAS pilot that friendly forces are within close proximity of the target (close is relative to the intended munition to be fired) </p>
@@ -3449,7 +4158,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>DSMS</h1>
-                    <p>Digital Stores management system (munition control screen on MFCD)</p>
+                    <p>Digital Stores management system (munition control screen on MFCD) <a href="#" manual="A10C" page="266">Manual</a></p>
                 </li>
                 <li>
                     <h1>DST</h1>
@@ -3465,7 +4174,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>DTOT</h1>
-                    <p>Desired Time On Target</p>
+                    <p>Desired Time On Target for Waypoint <a href="#" manual="A10C" page="470">Manual</a></p>
                 </li>
                 <li>
                     <h1>DTS</h1>
@@ -3476,12 +4185,12 @@ TACAN: 22X VAS</p>
                     <p>Digital Terrain System Application Software </p>
                 </li>
                 <li>
-                    <h1>DTTG</h1>
-                    <p>Desired Time To Go</p>
+                    <h1>DTOT</h1>
+                    <p>Desired Time On Target for Waypoint</p>
                 </li>
                 <li>
-                    <h1>EAC</h1>
-                    <p>Enhanced Attitude Control</p>
+                    <h1>DTTG</h1>
+                    <p>Desired Time To Go</p>
                 </li>
                 <li>
                     <h1>EAC</h1>
@@ -3500,12 +4209,12 @@ TACAN: 22X VAS</p>
                     <p>Electronic Engine Governor </p>
                 </li>
                 <li>
-                    <h1>EFC</h1>
-                    <p>Emergency Flight Control</p>
+                    <h1>EFCP</h1>
+                    <p>Emergency Flight Control Panel  <a href="#" manual="A10C" page="151">Manual</a></p>
                 </li>
                 <li>
                     <h1>EGI</h1>
-                    <p>Embedded GPS INS</p>
+                    <p>Embedded GPS INS  <a href="#" manual="A10C" page="170">Manual</a></p>
                 </li>
                 <li>
                     <h1>EGT</h1>
@@ -3564,6 +4273,10 @@ TACAN: 22X VAS</p>
                     <p>Firing Evaluation Display System</p>
                 </li>
                 <li>
+                    <h1>Feet wet/dry</h1>
+                    <p>Aircraft over water/land</p>
+                </li>
+                <li>
                     <h1>Fence-In/Out</h1>
                     <p>set up cockpit switches to prepare for combat. "fence out" when leaving.</p>
                 </li>
@@ -3585,16 +4298,16 @@ TACAN: 22X VAS</p>
                     <p>Field Of View</p>
                 </li>
                 <li>
-                    <h1>Fox one</h1>
+                    <h1>Fox 1</h1>
                     <p>semi-active radar guided missile launch (eg AIM 7 Sparrow)</p>
                 </li>
                 <li>
-                    <h1>Fox three</h1>
-                    <p>fully active missile launch (eg AMRAAM/Phoenix)</p>
+                    <h1>Fox 2</h1>
+                    <p>IR guided missile launch (eg AIM 9 Sidewinder)</p>
                 </li>
                 <li>
-                    <h1>Fox two</h1>
-                    <p>IR guided missile launch (eg AIM 9 Sidewinder)</p>
+                    <h1>Fox 3</h1>
+                    <p>fully active missile launch (eg AMRAAM/Phoenix)</p>
                 </li>
                 <li>
                     <h1>FPL</h1>
@@ -3607,6 +4320,10 @@ TACAN: 22X VAS</p>
                 <li>
                     <h1>Frogfoot</h1>
                     <p>nickname for the SU25 airplane</p>
+                </li>
+                <li>
+                    <h1>FSCP</h1>
+                    <p>Fuel System Control Panel  <a href="#" manual="A10C" page="132">Manual</a></p>
                 </li>
                 <li>
                     <h1>FSK</h1>
@@ -3637,8 +4354,12 @@ TACAN: 22X VAS</p>
                     <p>Guided Bomb Unit</p>
                 </li>
                 <li>
-                    <h1>GCAS" Ground Collision Avoidance System on the A10 ("Pull up, pull up</h1>
-                    <p>GG" Gas Generator</p>
+                    <h1>GCAS</h1>
+                    <p>Ground Collision Avoidance System on the A10 ("Pull up, pull up")</p>
+                </li>
+                <li>
+                    <h1>GG</h1>
+                    <p>Gas Generator</p>
                 </li>
                 <li>
                     <h1>GMT</h1>
@@ -3653,6 +4374,10 @@ TACAN: 22X VAS</p>
                     <p>Global positioning system</p>
                 </li>
                 <li>
+                    <h1>Grandslam</h1>
+                    <p>Informative All hostile aircraft of specified package (or target mission) are shot down.</p>
+                </li>
+                <li>
                     <h1>GS</h1>
                     <p>Ground Speed</p>
                 </li>
@@ -3662,11 +4387,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>HARS</h1>
-                    <p>Heading Attitude Reference System</p>
+                    <p>Heading Attitude Reference System <a href="#" manual="A10C" page="453">Manual</a></p>
                 </li>
                 <li>
                     <h1>HARS</h1>
-                    <p>Heading Attitude Reference System </p>
+                    <p>Heading Attitude Reference System <a href="#" manual="A10C" page="116">Manual</a></p>
                 </li>
                 <li>
                     <h1>HDG</h1>
@@ -3689,6 +4414,10 @@ TACAN: 22X VAS</p>
                     <p>nickname for the A10 airplane</p>
                 </li>
                 <li>
+                    <h1>Home Plate</h1>
+                    <p>Home airport</p>
+                </li>
+                <li>
                     <h1>HOTAS</h1>
                     <p>Hands On Throttle and Stick</p>
                 </li>
@@ -3698,11 +4427,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>HSI</h1>
-                    <p>Horizontal Situation Indicator cockpit instrument</p>
+                    <p>Horizontal Situation Indicator cockpit instrument <a href="#" manual="A10C" page="114">Manual</a></p>
                 </li>
                 <li>
                     <h1>HUD</h1>
-                    <p>head up display</p>
+                    <p>head up display  <a href="#" manual="A10C" page="359">Manual</a></p>
                 </li>
                 <li>
                     <h1>Huey</h1>
@@ -3730,7 +4459,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>IFF</h1>
-                    <p>Identify Friend or Foe</p>
+                    <p>Identify Friend or Foe  <a href="#" manual="A10C" page="149">Manual</a></p>
                 </li>
                 <li>
                     <h1>IFFCC</h1>
@@ -3746,7 +4475,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>ILS</h1>
-                    <p>Instrument landing system</p>
+                    <p>Instrument landing system  <a href="#" manual="A10C" page="474">Manual</a></p>
                 </li>
                 <li>
                     <h1>INS</h1>
@@ -3785,6 +4514,10 @@ TACAN: 22X VAS</p>
                     <p>Joint Tactical Radio System</p>
                 </li>
                 <li>
+                    <h1>Kansas</h1>
+                    <p>Out of Anti-to-air missiles (cmp Bingo for fuel, Dakota A/G, Arizona HARM, Nevada Mavericks)</p>
+                </li>
+                <li>
                     <h1>KIAS</h1>
                     <p>Knots Indicated Airspeed</p>
                 </li>
@@ -3798,7 +4531,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>LASTE</h1>
-                    <p>Low Altitude Safety and Targeting Enhancement system</p>
+                    <p>Low Altitude Safety and Targeting Enhancement system  <a href="#" manual="A10C" page="136">Manual</a></p>
                 </li>
                 <li>
                     <h1>LAT</h1>
@@ -3854,11 +4587,15 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>MGRS</h1>
-                    <p>Military Grid Reference System</p>
+                    <p>Military Grid Reference System <a href="#" manual="A10C" page="459">Manual</a></p>
                 </li>
                 <li>
                     <h1>MILS</h1>
                     <p>Abbreviation for milliradian; Bomb/Gun sight settings were expressed in mils, an angular measurement; one degree was equal to 17.45 mils.</p>
+                </li>
+                <li>
+                    <h1>mikes</h1>
+                    <p>Minutes: inbound, 5 mikes (army)</p>
                 </li>
                 <li>
                     <h1>MK-8x</h1>
@@ -3893,6 +4630,10 @@ TACAN: 22X VAS</p>
                     <p>Mean Sea Level</p>
                 </li>
                 <li>
+                    <h1>Mud spike</h1>
+                    <p>Spike: being painted by enemy radar. Mud spike = GROUND radar</p>
+                </li>
+                <li>
                     <h1>Mustang</h1>
                     <p>nickname for the P51 fighter airplane</p>
                 </li>
@@ -3905,12 +4646,21 @@ TACAN: 22X VAS</p>
                     <p>North Atlantic Treaty Organization NDB Non Directional Beacon</p>
                 </li>
                 <li>
+                    <h1>Nevada</h1>
+                    <p>Out of Maverick (AGM-65) missiles (cmp Bingo for fuel, Dakota A/G, Arizona HARM, Kansas A/A)</p>
+                </li>
+
+                <li>
                     <h1>Nine line</h1>
                     <p>formal delivery of targeting information by JTAC to CAS pilot: Type 1/2/3 Control is in effect, then <ol><li>IP (Initial point) location</li><li>Heading (IP to target)</li><li>Distance (IP to target)</li><li>Target elevation</li><li>Target Description</li><li>Target Location</li><li>Mark Type (smoke etc.)</li><li>Location of Friendlies</li><li>Egress route</li></ol></p>
                 </li>
                 <li>
                     <h1>NMSP</h1>
-                    <p>Navigation Mode Select Panel NWS Nosewheel Steering</p>
+                    <p>Navigation Mode Select Panel <a href="#" manual="A10C" page="452">Manual</a></p>
+                </li>
+                <li>
+                    <h1>NWS</h1>
+                    <p>Nosewheel Steering. Should be on while on ground <75knots. Pinkie switch toggles.</p>
                 </li>
                 <li>
                     <h1>NVG</h1>
@@ -3965,11 +4715,15 @@ TACAN: 22X VAS</p>
                     <p>Passive Ranging</p>
                 </li>
                 <li>
+                    <h1>Press</h1>
+                    <p>Directive: Continue the attack, support will be maintained. Supportive role will be assumed</p>
+                </li>
+                <li>
                     <h1>PRF</h1>
                     <p>Pulse Repetition Frequency</p>
                 </li>
                 <li>
-                    <h1>PrPNK" Russian "ПрПНК</h1>
+                    <h1>PrPNK, Russian ПрПНК</h1>
                     <p>Aircraft Targeting, Flight and Navigation System</p>
                 </li>
                 <li>
@@ -3994,11 +4748,15 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>Rifle</h1>
-                    <p>missile away</p>
+                    <p>missile away: launch of a AGM-65 Maverick</p>
                 </li>
                 <li>
                     <h1>RIO</h1>
                     <p>Navy Radar Intercept Officer backseater </p>
+                </li>
+                <li>
+                    <h1>Ripple</h1>
+                    <p>Two or more munitions released or fired in close succession</p>
                 </li>
                 <li>
                     <h1>RMI</h1>
@@ -4030,11 +4788,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>RWR</h1>
-                    <p>Radar warning receiver</p>
-                </li>
-                <li>
-                    <h1>RWR</h1>
-                    <p>Radar Warning Receiver</p>
+                    <p>Radar warning receiver <a href="#" manual="A10C" page="410">Manual</a></p>
                 </li>
                 <li>
                     <h1>SADL</h1>
@@ -4054,7 +4808,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>SAS</h1>
-                    <p>Stability Augmentation System on the A10</p>
+                    <p>Stability Augmentation System on the A10 <a href="#" manual="A10C" page="148">Manual</a></p>
                 </li>
                 <li>
                     <h1>SEAD</h1>
@@ -4069,12 +4823,16 @@ TACAN: 22X VAS</p>
                     <p>Survival, Evasion, Resistance, and Escape pilot training</p>
                 </li>
                 <li>
+                    <h1>Snooze</h1>
+                    <p>Turn off all radar and ECM</p>
+                </li>
+                <li>
                     <h1>Shack</h1>
                     <p>ground target destroyed (cmp Splash air target)</p>
                 </li>
                 <li>
                     <h1>SOI</h1>
-                    <p>Sensor of Interest</p>
+                    <p>Sensor of Interest <a href="#" manual="A10C" page="397">Manual</a></p>
                 </li>
                 <li>
                     <h1>Sparkle</h1>
@@ -4082,11 +4840,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>SPI</h1>
-                    <p>Sensor Point of Interest</p>
+                    <p>Sensor Point of Interest <a href="#" manual="A10C" page="397">Manual</a></p>
                 </li>
                 <li>
                     <h1>Spike</h1>
-                    <p>missile detected: RWR indication of an AI threat in track, launch, or unknown mode; include bearing, clock position, and threat type, if known</p>
+                    <p>missile detected: RWR indication of an AI threat in track, launch, or unknown mode; include bearing, clock position, and threat type, if known. Mud spike: ground radar</p>
                 </li>
                 <li>
                     <h1>SPJ</h1>
@@ -4094,11 +4852,15 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>Splash</h1>
-                    <p>enemy aircraft shot down (cmp Shank ground target)</p>
+                    <p>A/G weapons impact. A/A target destroyed. Usually fallowed with numbers to indicate kills</p>
                 </li>
                 <li>
                     <h1>SRU</h1>
                     <p>Shop Replaceable Unit</p>
+                </li>
+                <li>
+                    <h1>Status</h1>
+                    <p>Request for tactical situation. Response by “offensive”, “defensive” or “neutral” with BRA (bearing, range, altitude)</p>
                 </li>
                 <li>
                     <h1>STP</h1>
@@ -4110,15 +4872,15 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>TACAN</h1>
-                    <p>Tactical Air Navigation system</p>
+                    <p>Tactical Air Navigation system. <a href="#" manual="A10C" page="472">Manual</a></p>
                 </li>
                 <li>
                     <h1>TACP</h1>
-                    <p>Tactical air control party</p>
+                    <p>Tactical air control party (4 people: JTAC, apprentice JTAC, FAC, Air Force Liaison Officer)</p>
                 </li>
                 <li>
                     <h1>TAD</h1>
-                    <p>Tactical awareness display (map display on MFCD)</p>
+                    <p>Tactical awareness display (map display on MFCD) <a href="#" manual="A10C" page="299">Manual</a></p>
                 </li>
                 <li>
                     <h1>TADS</h1>
@@ -4146,7 +4908,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>TGP</h1>
-                    <p>Targeting pod</p>
+                    <p>Targeting pod <a href="#" manual="A10C" page="323">Manual</a></p>
                 </li>
                 <li>
                     <h1>TH</h1>
@@ -4158,7 +4920,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>TISL</h1>
-                    <p>Target Identification Set Laser</p>
+                    <p>Target Identification Set, Laser <a href="#" manual="A10C" page="117">Manual</a></p>
                 </li>
                 <li>
                     <h1>TMS</h1>
@@ -4198,7 +4960,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>TTRN</h1>
-                    <p>Time to Release Numeric TVV Total Velocity Vector</p>
+                    <p>Time to Release Numeric</p>
                 </li>
                 <li>
                     <h1>TV</h1>
@@ -4209,8 +4971,12 @@ TACAN: 22X VAS</p>
                     <p>Television Monitor</p>
                 </li>
                 <li>
-                    <h1>TVV" Total velocity Vector</h1>
-                    <p>UAS" Unmanned air system</p>
+                    <h1>TVV</h1>
+                    <p>Total Velocity Vector. Circle with "wings and vertical stabilizer" symbol in HUD. Indicates the actual flight direction of the aircraft, which may not correspond with where the nose of the jet is pointed. <a href="#" manual="A10C" page="478">Manual</a></p>
+                </li>
+                <li>
+                    <h1>UAS</h1>
+                    <p>Unmanned air system</p>
                 </li>
                 <li>
                     <h1>UAV</h1>
@@ -4222,7 +4988,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>UFC</h1>
-                    <p>Up front controller keypad</p>
+                    <p>Up front controller keypad  <a href="#" manual="A10C" page="254">Manual</a></p>
                 </li>
                 <li>
                     <h1>Unable</h1>
@@ -4230,11 +4996,15 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>UHF</h1>
-                    <p>Ultra High Frequency</p>
+                    <p>Ultra High Frequency 200-400 Mhz <a href="#" manual="A10C" page="141">Manual</a></p>
                 </li>
                 <li>
                     <h1>UTC</h1>
                     <p>Coordinated Universal Time</p>
+                </li>
+                <li>
+                    <h1>UTM</h1>
+                    <p>Universal Transverse Mercator map projection. Requires grid zone id (1..60), Northing, Easting</p>
                 </li>
                 <li>
                     <h1>VFR</h1>
@@ -4242,7 +5012,11 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>VHF</h1>
-                    <p>Very High Frequency</p>
+                    <p>Very High Frequency 116-150 Mhz  <a href="#" manual="A10C" page="139">Manual</a></p>
+                </li>
+                <li>
+                    <h1>VHF FM</h1>
+                    <p>Very High Frequency FM 30-76 Mhz</p>
                 </li>
                 <li>
                     <h1>VMU</h1>
@@ -4262,7 +5036,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>VVI</h1>
-                    <p>Vertical velocity indicator</p>
+                    <p>Vertical velocity indicator <a href="#" manual="A10C" page="123">Manual</a></p>
                 </li>
                 <li>
                     <h1>Warthog</h1>
@@ -4290,7 +5064,7 @@ TACAN: 22X VAS</p>
                 </li>
                 <li>
                     <h1>Winchester</h1>
-                    <p>No ordnance remaining</p>
+                    <p>No ordnance remaining, not even guns</p>
                 </li>
                 <li>
                     <h1>WP</h1>
@@ -4381,13 +5155,33 @@ TACAN: 22X VAS</p>
 
     
     <div data-role="page" id="image-container">
-        <div data-role="header" data-theme="a">
+        <div data-role="header" data-theme="a" data-position="fixed">
             <a data-rel="back">Back</a>
             <h1 id="image-container-title">Map</h1>
             <a href="index.html">Home</a>
         </div>
-        <div role="main" height="100%">
-            <img src="" style="max-width: 100%;max-height: 95%;" id="image-container-src"/>
+        <div role="main" height="100%" style="position:relative;">
+            <img src="" style="max-width: 100%;max-height: 95%;z-index:900" id="image-container-src"/>
+            <canvas id="image-canvas" style="float:left;position:absolute;z-index:950;left:0px;top:0px;overflow:hidden;"></canvas>
+        </div>
+        <div data-role="popup" id="popupMenu">
+            <div class="scribbler-color-swatch" style="background-color:red"></div>
+            <div class="scribbler-color-swatch" style="background-color:green"></div>
+            <div class="scribbler-color-swatch" style="background-color:yellow"></div>
+            <div class="scribbler-color-swatch" style="background-color:blue"></div>
+            <div class="scribbler-color-swatch" style="background-color:magenta"></div>
+            <div class="scribbler-color-swatch" style="background-color:cyan"></div>
+        </div>
+        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false">
+            <!-- cannot do favs, notes yet until we have a page each for every image
+            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
+            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
+            -->
+            <a href="#" data-role="button" data-icon="edit" class="footer-button scribbler-draw-btn scribbler-tool-btn"></a>
+            <a href="#" data-role="button" data-icon="location" class="footer-button scribbler-mark-btn scribbler-tool-btn"></a>
+            <a href="#popupMenu" data-rel="popup" data-icon="grid" class="footer-button scribbler-color-btn" data-transition="slideup" ></a>
+            <a href="#" data-role="button" data-icon="back" class="footer-button scribbler-undo-btn"></a>
+            <a href="#" data-role="button" data-icon="delete" class="footer-button scribbler-wipe-btn"></a>
         </div>
     </div>
     
@@ -4401,7 +5195,7 @@ TACAN: 22X VAS</p>
         </div>
         <div data-role="content">
             <div class="ui-field-contain">
-                <label for="speak-checklists">Speak checklists:</label>
+                <label for="speak-checklists">Speech output:</label>
                     <select name="speak-checklists" id="speak-checklists" data-role="slider">
                         <option value="off">No</option>
                         <option value="on">Yes</option>
@@ -4432,31 +5226,6 @@ TACAN: 22X VAS</p>
 
 
     
-    <div data-role="page" id="calculators">
-        <div data-role="header" data-theme="a">
-            <a data-rel="back">Back</a>
-            <h1>Calculators</h1>
-            <a href="index.html">Home</a>
-        </div>
-        <div data-role="content">
-            <ul data-role="listview" data-filter="true">
-                <li><a href="#spoken-calculator">Spoken</a></li>
-                <li data-role="list-divider">Distances</li>
-                <li><a href="#m2ft-calculator">Metric to Imperial</a></li>
-                <li><a href="#m2nm-calculator">Meters to nm</a></li>
-                <li><a href="#ft2m-calculator">Imperial to Metric</a></li>
-                <li data-role="list-divider">Speeds</li>
-                <li><a href="#kmh2k-calculator">km/h to knots</a></li>
-                <li><a href="#k2kmh-calculator">knots to km/h</a></li>
-            </ul>
-        </div>
-        <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
-            <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
-            <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
-        </div>
-    </div>
-
-
 
 
     <div data-role="page" id="spoken-calculator">
@@ -4468,29 +5237,30 @@ TACAN: 22X VAS</p>
         <div data-role="content">
             <form>
                 <label for="spoken-calc-query">Type or use your microphone to speak a conversion query into this field</label>
-                <input type="text" name="spoken-calc-query" id="spoken-calc-query" value=""
+                <input type="text" data-type="search" name="spoken-calc-query" id="spoken-calc-query" value=""
                 placeholder="17 kilometers in miles">
+                <h2 id="calculator-results"></h2>
                 <input type="submit" value="Convert">
-                <p>Examples:</p>
-                <ul>
-                    <li>eight miles in kilometers</li>
-                    <li>240 knots to km/h</li>
-                    <li>six meters per second to feet per minute</li>
-                </ul>
             </form>
+            <div id="calculator-tape" style="display:none;">
+                <p>Past results:</p>
+                <ul>
+                </ul>
+            </div>
+            <p>Examples:</p>
+            <ul>
+                <li>8 miles in kilometers</li>
+                <li>240 knots to km/h</li>
+                <li>6 meters per second</li>
+                <li>26 degrees celsius</li>
+                <li>32 F</li>
+            </ul>
         </div>
         <div data-role="footer" data-theme="a" data-position="fixed" data-disable-page-zoom="false" data-tap-toggle="false" data-tap-toggle="false">
             <a href="#edit-note" data-role="button" data-transition="slideup" data-icon="edit" class="footer-button">Notes</a>
             <a href="#favs" data-role="button" data-icon="star" class="footer-button">Favs</a>
         </div>
     </div>
-    <script>
-    $("#spoken-calculator form").on("submit", function(event) {
-        var url = 'https://www.google.com/search?q=' + encodeURIComponent($('#spoken-calc-query').val());
-        window.open( url, 'calc'); 
-        event.preventDefault();
-    });
-    </script>
 
 
     
